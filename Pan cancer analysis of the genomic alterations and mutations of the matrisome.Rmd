@@ -1,0 +1,3082 @@
+---
+title: "Pan-cancer analysis of the genomic alterations and mutations of the matrisome"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+self_contained: yes
+---
+<style>
+body {
+text-align: justify}
+</style>
+
+For any question about the data and results please contact:
+- Prof. A. Naba, anaba@uic.edu
+- Prof. V. Izzi, valerio.izzi@oulu.fi
+
+For questions and issues with the code, please contact:
+- Prof. V. Izzi, valerio.izzi@oulu.fi
+
+Pan-cancer analysis of the genomic alterations and mutations of the matrisome
+
+This code was used to generate all the analyses presented in the manuscript "Pan-cancer analysis of the genomic alterations and mutations of the matrisome" by Valerio Izzi, Martin N. Davis and Alexandra Naba. Also, for transparency and reproducibility, we have enclosed a section on questions from (and answers to) reviewers.
+
+The code is provided as it is, with no guarantee on performance, issues etc. Also, the code requires several libraries whose installation calls are not contained in these chunks. 
+
+DATASETS
+
+All data are from TCGA PANCAN cohort*, downloaded from Xena (https://xenabrowser.net/datapages/?cohort=TCGA%20Pan-Cancer%20(PANCAN)&removeHub=https%3A%2F%2Fxena.treehouse.gi.ucsc.edu%3A443). The only exception is in the final steps, required for revisions (see below).
+
+The following files are downloaded:
+
+* CNV (copy number variations): gene-level copy number (gistic2_thresholded) (n=10,845) {description: TCGA pan-cancer gene-level copy number variation (CNV) estimated using the GISTIC2 threshold method,compiled using data from all TCGA cohorts. Copy number was measured experimentally using whole genome microarray at a TCGA genome characterization center. Subsequently,GISTIC2 method was applied using the TCGA FIREHOSE pipeline to produce gene-level copy number estimates. GISTIC2 further thresholded the estimated values to -2,-1,0,1,2,representing homozygous deletion,single copy deletion,diploid normal copy,low-level copy number amplification,or high-level copy number amplification. Genes are mapped onto the human genome coordinates using UCSC cgData HUGO probeMap. Reference to GISTIC2 method PMID:21527027.}
+ 
+* somatic mutation (SNP and INDEL) - MC3 public version {no description available, but see here for harmonized dataset https://www.cell.com/cell-systems/pdfExtended/S2405-4712(19)30201-7}
+
+* clinical data: curated clinical data {description: Curated clinical data from the Pan-cancer Atlas paper titled "An Integrated TCGA Pan-Cancer Clinical Data Resource (TCGA-CDR) to drive high quality survival outcome analytics". The paper highlights four types of carefully curated survival endpoints, and recommends the use of the endpoints of OS, PFI, DFI, and DSS for each TCGA cancer type.OS: overall survialPFI: progression-free intervalDSS: disease-specific survivalDFI: disease-free interval}
+ 
+* expression data: slices of transcriptomics data including all matrisome genes, through the Xena interface. Data are are from the Batch effects normalized mRNA data dataset {log2(norm_value+1), colNormalization:true, url": "https://www.synapse.org/#!Synapse:syn4976369.3}
+
+STEP 1: CREATE A DATABASE TO HANDLE DATA
+
+```{r eval=FALSE}
+library(dplyr)
+library(data.table)
+
+gis <- fread("Gistic2_CopyNumber_Gistic2_all_thresholded.by_genes.txt", header=T, sep="\t") #import the data#
+mut <- fread("mc3.v0.2.8.PUBLIC.xena.txt", header=T, sep="\t")
+clin <- fread("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+gis <- as.data.frame(gis)
+mut <- as.data.frame(mut)
+clin <- as.data.frame(clin)
+rownames(gis) <- gis[,1] #manipulate GIS file to format as the other files#
+gis[,1] <- NULL
+gis <- as.data.frame(t(gis))
+gis$sample <- as.character(rownames(gis))
+rownames(gis) <- NULL
+gis <- gis[,c(24777,2:24776)]
+gis$sample <- gsub("\\.", "-", gis$sample)
+
+nab <- c("LUAD", "LUSC", "BRCA", "OV", "CESC", "UCEC", "UCS", "PRAD", "PAAD", "COAD", "READ", "STAD", "ESCA", "SKCM") #tumor types from A. Naba, cut to these#
+smp <- subset(clin, clin$cancer.type.abbreviation %in% nab)
+smp <- clin$sample
+gis <- subset(gis, gis$sample %in% smp)
+mut <- subset(mut, mut$sample %in% smp)
+clin <- subset(clin, clin$sample %in% smp)
+
+smp <- intersect(gis$sample,mut$sample)
+smp <- intersect(smp,clin$sample)
+gis <- subset(gis, gis$sample %in% smp)
+mut <- subset(mut, mut$sample %in% smp)
+clin <- subset(clin, clin$sample %in% smp)
+
+mn <- read.table("matrisome_hs.txt", header=T, sep="\t") #cut to matrisome genes#
+mn <- mn$Gene.Symbol
+mn <- as.character(mn)
+rownames(gis) <- gis[,1]
+gis[,1] <- NULL
+gis <- gis[,colnames(gis) %in% mn]
+mut <- mut[mut$gene %in% mn,]
+
+fin <- list(cnv = gis, mut = mut) #make a list object and save it for reload/restore, unload all and gc#
+
+saveRDS(fin, "matrisome_cnv and mutations.rds")
+rm(list=ls())
+gc()
+
+```
+
+STEP 2: GENERAL DIMENSIONS OF THE PROJECT
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds")
+ncol(fin[[1]]) # equal to length(unique(fin[[2]]$gene))# #N of matrisome genes sampled: 1014#
+nrow(fin[[1]]) #N of initial samples with CNV profiled: 8869#
+length(unique(fin[[2]]$sample)) #N of initial samples with mutations profiled: 8236#
+nab <- c("LUAD", "LUSC", "BRCA", "OV", "CESC", "UCEC", "UCS", "PRAD", "PAAD", "COAD", "READ", "STAD", "ESCA", "SKCM")
+length(nab) #N of tumors analyzed: 14#
+
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+clin <- subset(clin, clin$cancer.type.abbreviation %in% nab)
+np <- table(clin$cancer.type.abbreviation) #N of patients per tumor type and in total#
+sum(np)
+
+sub1 <- subset(fin[[1]],rownames(fin[[1]]) %in% clin$sample)
+dim(sub1) <- #total in project, with or withour CNAs#
+dim(sub1[rowSums(sub1) != 0,]) #total number with CNAs, should match later on#
+sub2 <- subset(fin[[2]],fin[[2]]$sample %in% clin$sample)
+length(unique(sub2$sample))#total number with mutations, should match later on#
+
+gis <- fread("Gistic2_CopyNumber_Gistic2_all_thresholded.by_genes.txt", header=T, sep="\t") #import the data to create a global data frame#
+gis <- as.data.frame(gis)
+rownames(gis) <- gis[,1] #manipulate GIS file to format as the other files#
+gis[,1] <- NULL
+gis <- as.data.frame(t(gis))
+gis$sample <- as.character(rownames(gis))
+rownames(gis) <- NULL
+gis <- gis[,c(24777,2:24776)]
+gis$sample <- gsub("\\.", "-", gis$sample)
+glob <- gis
+gis <- fin[[1]]
+gis$sample <- rownames(gis)
+glob <- subset(glob, glob$sample %in% gis$sample)
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- colnames(gis[2:ncol(gis)])
+r <- merge(glob, clin, by="sample")
+r <- r[,c(1,24777,2:24776)]
+rownames(r) <- r[,1]
+r[,1] <- NULL
+gis <- NULL
+glob <- NULL
+gc()
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "cancer.type.abbreviation"
+r <- subset(r, r$cancer.type.abbreviation %in% ac$cancer.type.abbreviation)
+res <- list()
+for(i in unique(r$cancer.type.abbreviation)){
+  z <- subset(r, r$cancer.type.abbreviation == i)
+  z[,1] <- NULL
+  z2 <- z[,colnames(z) %in% m]
+  z2$sum <- rowSums(z2)
+  z2 <- subset(z2,!z2$sum==0)
+  res[[i]] <- data.frame(tumor.type=i,n.of.samp.CNA=nrow(z2))
+}
+res <- bind_rows(res)
+res <- res[order(res$tumor.type),] #N of patients with matrisome CNAs per tumor type#
+sum(res[,2]) #total#
+
+mut <- fin[[2]]
+mut <- subset(mut, mut$gene %in% m)
+mut <- merge(mut,clin,by="sample")
+mut <- subset(mut, mut$cancer.type.abbreviation %in% ac$cancer.type.abbreviation)
+res <- list()
+for(i in unique(mut$cancer.type.abbreviation)){
+  z <- subset(mut, mut$cancer.type.abbreviation == i)
+  z <- z[,c(1,13)]
+  z <- unique(z)
+  res[[i]] <- data.frame(tumor.type=i, n.with.mut=nrow(z))
+}
+res <- bind_rows(res)
+res <- res[order(res$tumor.type),] #N of patients with matrisome mutations per tumor type#
+sum(res[,2]) #total#
+
+
+```
+
+STEP 3: CNAs in MATRISOME vs. REST OF THE GENOME, UNSUBSETTED
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds")
+gis <- fread("Gistic2_CopyNumber_Gistic2_all_thresholded.by_genes.txt", header=T, sep="\t") #import the data to create a global data frame#
+gis <- as.data.frame(gis)
+rownames(gis) <- gis[,1] #manipulate GIS file to format as the other files#
+gis[,1] <- NULL
+gis <- as.data.frame(t(gis))
+gis$sample <- as.character(rownames(gis))
+rownames(gis) <- NULL
+gis <- gis[,c(24777,2:24776)]
+gis$sample <- gsub("\\.", "-", gis$sample)
+glob <- gis
+
+gis <- fin[[1]]
+gis$sample <- rownames(gis)
+glob <- subset(glob, glob$sample %in% gis$sample)
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- colnames(gis[2:ncol(gis)])
+r <- merge(glob, clin, by="sample")
+r <- r[,c(1,24777,2:24776)]
+rownames(r) <- r[,1]
+r[,1] <- NULL
+gis <- NULL
+glob <- NULL
+gc()
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "cancer.type.abbreviation"
+
+r <- subset(r, r$cancer.type.abbreviation %in% ac$cancer.type.abbreviation)
+
+res1 <- list() #this loop calculates all CNAs, binned by categories, in matrisome and rest of the genome#
+res2 <- list()
+res3 <- list()
+res4 <- list()
+res5 <- list()
+for(i in unique(r$cancer.type.abbreviation)){
+  z <- subset(r, r$cancer.type.abbreviation == i)
+  z[,1] <- NULL
+  z <- as.matrix(z)
+  cn.tot <- as.data.frame(colSums(z != 0))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res1[[i]] <- cn.tot
+  
+  cn.tot <- as.data.frame(colSums(z == 2))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res2[[i]] <- cn.tot
+  
+  cn.tot <- as.data.frame(colSums(z == 1))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res3[[i]] <- cn.tot
+  
+  cn.tot <- as.data.frame(colSums(z == -1))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res4[[i]] <- cn.tot
+  
+  cn.tot <- as.data.frame(colSums(z == -2))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res5[[i]] <- cn.tot
+}
+
+library(RColorBrewer)
+res1 <- bind_rows(res1)
+res2 <- bind_rows(res2)
+res3 <- bind_rows(res3)
+res4 <- bind_rows(res4)
+res5 <- bind_rows(res5)
+
+df <- list()
+stat1 <- as.data.frame(table(res1$perc.cnv,res1$tumor,res1$source))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  z <- z[order(z$Var3),]
+  z2 <- data.frame(source=unique(z$Var3),rbind(z$Freq[1:4],z$Freq[5:8]))
+  rownames(z2) <- z2[,1]
+  z2[,1] <- NULL
+  z2 <- z2+1
+  ch <- chisq.test(z2)
+  p <- ch$p.value
+  df[[i]] <- data.frame(tumor=i, chi.square.Pvalue=p)
+}
+df <- bind_rows(df)
+df$CNA.type <- "total"
+df <- df[order(df$tumor),]
+sb1 <- df
+
+df <- list()
+stat1 <- as.data.frame(table(res2$perc.cnv,res2$tumor,res2$source))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  z <- z[order(z$Var3),]
+  z2 <- data.frame(source=unique(z$Var3),rbind(z$Freq[1:3],z$Freq[4:6]))
+  rownames(z2) <- z2[,1]
+  z2[,1] <- NULL
+  z2 <- z2+1
+  ch <- chisq.test(z2,comple)
+  p <- ch$p.value
+  df[[i]] <- data.frame(tumor=i, chi.square.Pvalue=p)
+}
+df <- bind_rows(df)
+df$CNA.type <- "deep amp"
+df <- df[order(df$tumor),]
+sb2 <- df
+
+df <- list()
+stat1 <- as.data.frame(table(res3$perc.cnv,res3$tumor,res3$source))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  z <- z[order(z$Var3),]
+  z2 <- data.frame(source=unique(z$Var3),rbind(z$Freq[1:5],z$Freq[6:10]))
+  rownames(z2) <- z2[,1]
+  z2[,1] <- NULL
+  z2 <- z2+1
+  ch <- chisq.test(z2,comple)
+  p <- ch$p.value
+  df[[i]] <- data.frame(tumor=i, chi.square.Pvalue=p)
+}
+df <- bind_rows(df)
+df$CNA.type <- "shallow amp"
+df <- df[order(df$tumor),]
+sb3 <- df
+
+df <- list()
+stat1 <- as.data.frame(table(res4$perc.cnv,res4$tumor,res4$source))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  z <- z[order(z$Var3),]
+  z2 <- data.frame(source=unique(z$Var3),rbind(z$Freq[1:5],z$Freq[6:10]))
+  rownames(z2) <- z2[,1]
+  z2[,1] <- NULL
+  z2 <- z2+1
+  ch <- chisq.test(z2,comple)
+  p <- ch$p.value
+  df[[i]] <- data.frame(tumor=i, chi.square.Pvalue=p)
+}
+df <- bind_rows(df)
+df$CNA.type <- "shallow del"
+df <- df[order(df$tumor),]
+sb4 <- df
+
+df <- list()
+stat1 <- as.data.frame(table(res5$perc.cnv,res5$tumor,res5$source))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  z <- z[order(z$Var3),]
+  z2 <- data.frame(source=unique(z$Var3),rbind(z$Freq[1:3],z$Freq[4:6]))
+  rownames(z2) <- z2[,1]
+  z2[,1] <- NULL
+  z2 <- z2+1
+  ch <- chisq.test(z2,comple)
+  p <- ch$p.value
+  df[[i]] <- data.frame(tumor=i, chi.square.Pvalue=p)
+}
+df <- bind_rows(df)
+df$CNA.type <- "deep del"
+df <- df[order(df$tumor),]
+sb5 <- df
+
+fin <- bind_rows(sb1,sb2,sb3,sb4,sb5)
+fwrite(fin, "CNAs_not subdivided_chi square tests.csv", sep=",", row.names = F, quote = F)
+
+f <- list()
+for(i in unique(res1$tumor)){
+  z1 <- subset(res1, res1$tumor == i)
+  tot.1 <- nrow(z1[z1$source == "matrisome",])
+  tot.2 <- nrow(z1[z1$source == "rest of genome",])
+  f[[i]] <- data.frame(tumor=i, source=c("matrisome", "rest of genome"), value=c(tot.1,tot.2))
+}
+f <- bind_rows(f)
+tab1 <- as.data.frame(table(res1$perc.cnv, res1$tumor, res1$source))
+colnames(tab1) <- c("binned.group", "tumor","source", "freq")
+res1 <- merge(tab1, f, by=c("tumor","source"))
+res1$perc <- round((res1$freq/res1$value)*100,0)
+res1$x <- ifelse(res1$source == "matrisome", 1, 2)
+res1$col <- ifelse(res1$x==1, "darkslateblue", "grey80")
+
+library(ggplot2)
+for(i in unique(res1$tumor)){
+  z <- subset(res1, res1$tumor == i)
+  g <- ggplot(z, aes(x=x, y=freq, fill=col)) + geom_bar(aes(alpha=binned.group),position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(z$col))) + theme_classic() +
+  xlab("") + ylab("frequency of each binned CNV group") + scale_x_continuous(breaks = unique(z$x), labels = as.character(unique(z$source))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+  nam <- paste("comparison_TOTAL_",i,".jpg",sep="")
+  ggsave(nam)
+}
+
+res1 <- res2
+f <- list()
+for(i in unique(res1$tumor)){
+  z1 <- subset(res1, res1$tumor == i)
+  tot.1 <- nrow(z1[z1$source == "matrisome",])
+  tot.2 <- nrow(z1[z1$source == "rest of genome",])
+  f[[i]] <- data.frame(tumor=i, source=c("matrisome", "rest of genome"), value=c(tot.1,tot.2))
+}
+f <- bind_rows(f)
+tab1 <- as.data.frame(table(res1$perc.cnv, res1$tumor, res1$source))
+colnames(tab1) <- c("binned.group", "tumor","source", "freq")
+res1 <- merge(tab1, f, by=c("tumor","source"))
+res1$perc <- round((res1$freq/res1$value)*100,0)
+res1$x <- ifelse(res1$source == "matrisome", 1, 2)
+res1$col <- ifelse(res1$x==1, "darkslateblue", "grey80")
+
+for(i in unique(res1$tumor)){
+  z <- subset(res1, res1$tumor == i)
+  g <- ggplot(z, aes(x=x, y=freq, fill=col)) + geom_bar(aes(alpha=binned.group),position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(z$col))) + theme_classic() +
+    xlab("") + ylab("frequency of each binned CNV group") + scale_x_continuous(breaks = unique(z$x), labels = as.character(unique(z$source))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+  nam <- paste("comparison_DEEP AMPL_",i,".jpg",sep="")
+  ggsave(nam)
+}
+
+res1 <- res3
+f <- list()
+for(i in unique(res1$tumor)){
+  z1 <- subset(res1, res1$tumor == i)
+  tot.1 <- nrow(z1[z1$source == "matrisome",])
+  tot.2 <- nrow(z1[z1$source == "rest of genome",])
+  f[[i]] <- data.frame(tumor=i, source=c("matrisome", "rest of genome"), value=c(tot.1,tot.2))
+}
+f <- bind_rows(f)
+tab1 <- as.data.frame(table(res1$perc.cnv, res1$tumor, res1$source))
+colnames(tab1) <- c("binned.group", "tumor","source", "freq")
+res1 <- merge(tab1, f, by=c("tumor","source"))
+res1$perc <- round((res1$freq/res1$value)*100,0)
+res1$x <- ifelse(res1$source == "matrisome", 1, 2)
+res1$col <- ifelse(res1$x==1, "darkslateblue", "grey80")
+
+for(i in unique(res1$tumor)){
+  z <- subset(res1, res1$tumor == i)
+  g <- ggplot(z, aes(x=x, y=freq, fill=col)) + geom_bar(aes(alpha=binned.group),position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(z$col))) + theme_classic() +
+    xlab("") + ylab("frequency of each binned CNV group") + scale_x_continuous(breaks = unique(z$x), labels = as.character(unique(z$source))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+  nam <- paste("comparison_SHALLOW AMPL_",i,".jpg",sep="")
+  ggsave(nam)
+}
+
+res1 <- res4
+f <- list()
+for(i in unique(res1$tumor)){
+  z1 <- subset(res1, res1$tumor == i)
+  tot.1 <- nrow(z1[z1$source == "matrisome",])
+  tot.2 <- nrow(z1[z1$source == "rest of genome",])
+  f[[i]] <- data.frame(tumor=i, source=c("matrisome", "rest of genome"), value=c(tot.1,tot.2))
+}
+f <- bind_rows(f)
+tab1 <- as.data.frame(table(res1$perc.cnv, res1$tumor, res1$source))
+colnames(tab1) <- c("binned.group", "tumor","source", "freq")
+res1 <- merge(tab1, f, by=c("tumor","source"))
+res1$perc <- round((res1$freq/res1$value)*100,0)
+res1$x <- ifelse(res1$source == "matrisome", 1, 2)
+res1$col <- ifelse(res1$x==1, "darkslateblue", "grey80")
+
+for(i in unique(res1$tumor)){
+  z <- subset(res1, res1$tumor == i)
+  g <- ggplot(z, aes(x=x, y=freq, fill=col)) + geom_bar(aes(alpha=binned.group),position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(z$col))) + theme_classic() +
+    xlab("") + ylab("frequency of each binned CNV group") + scale_x_continuous(breaks = unique(z$x), labels = as.character(unique(z$source))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+  nam <- paste("comparison_SHALLOW DEL_",i,".jpg",sep="")
+  ggsave(nam)
+}
+
+res1 <- res5
+f <- list()
+for(i in unique(res1$tumor)){
+  z1 <- subset(res1, res1$tumor == i)
+  tot.1 <- nrow(z1[z1$source == "matrisome",])
+  tot.2 <- nrow(z1[z1$source == "rest of genome",])
+  f[[i]] <- data.frame(tumor=i, source=c("matrisome", "rest of genome"), value=c(tot.1,tot.2))
+}
+f <- bind_rows(f)
+tab1 <- as.data.frame(table(res1$perc.cnv, res1$tumor, res1$source))
+colnames(tab1) <- c("binned.group", "tumor","source", "freq")
+res1 <- merge(tab1, f, by=c("tumor","source"))
+res1$perc <- round((res1$freq/res1$value)*100,0)
+res1$x <- ifelse(res1$source == "matrisome", 1, 2)
+res1$col <- ifelse(res1$x==1, "darkslateblue", "grey80")
+
+for(i in unique(res1$tumor)){
+  z <- subset(res1, res1$tumor == i)
+  g <- ggplot(z, aes(x=x, y=freq, fill=col)) + geom_bar(aes(alpha=binned.group),position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(z$col))) + theme_classic() +
+    xlab("") + ylab("frequency of each binned CNV group") + scale_x_continuous(breaks = unique(z$x), labels = as.character(unique(z$source))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+  nam <- paste("comparison_DEEP DEL_",i,".jpg",sep="")
+  ggsave(nam)
+}
+
+```
+
+STEP 4: CNAs in MATRISOME vs. REST OF THE GENOME, SUBSETTED BY MATRISOME CATEGORIES
+
+```{r eval=FALSE}
+
+rm(list = ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds")
+gis <- fread("Gistic2_CopyNumber_Gistic2_all_thresholded.by_genes.txt", header=T, sep="\t") #import the data to create a global data frame#
+gis <- as.data.frame(gis)
+rownames(gis) <- gis[,1] #manipulate GIS file to format as the other files#
+gis[,1] <- NULL
+gis <- as.data.frame(t(gis))
+gis$sample <- as.character(rownames(gis))
+rownames(gis) <- NULL
+gis <- gis[,c(24777,2:24776)]
+gis$sample <- gsub("\\.", "-", gis$sample)
+glob <- gis
+
+gis <- fin[[1]]
+gis$sample <- rownames(gis)
+glob <- subset(glob, glob$sample %in% gis$sample)
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- colnames(gis[2:ncol(gis)])
+r <- merge(glob, clin, by="sample")
+r <- r[,c(1,24777,2:24776)]
+rownames(r) <- r[,1]
+r[,1] <- NULL
+gis <- NULL
+glob <- NULL
+gc()
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "cancer.type.abbreviation"
+
+r <- subset(r, r$cancer.type.abbreviation %in% ac$cancer.type.abbreviation)
+
+res1 <- list() #this loop calculates all CNAs, binned by categories, in matrisome and rest of the genome#
+res2 <- list()
+res3 <- list()
+res4 <- list()
+res5 <- list()
+for(i in unique(r$cancer.type.abbreviation)){
+  z <- subset(r, r$cancer.type.abbreviation == i)
+  z[,1] <- NULL
+  z <- as.matrix(z)
+  cn.tot <- as.data.frame(colSums(z != 0))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res1[[i]] <- cn.tot
+  
+  cn.tot <- as.data.frame(colSums(z == 2))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res2[[i]] <- cn.tot
+  
+  cn.tot <- as.data.frame(colSums(z == 1))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res3[[i]] <- cn.tot
+  
+  cn.tot <- as.data.frame(colSums(z == -1))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res4[[i]] <- cn.tot
+  
+  cn.tot <- as.data.frame(colSums(z == -2))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res5[[i]] <- cn.tot
+}
+
+library(RColorBrewer)
+res1 <- bind_rows(res1)
+res2 <- bind_rows(res2)
+res3 <- bind_rows(res3)
+res4 <- bind_rows(res4)
+res5 <- bind_rows(res5)
+
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+names(mat)[3] <- "gene"
+
+res1 <- merge(res1, mat, by="gene", all.x=T)
+res1$Category <- ifelse(is.na(res1$Category) == T, "none", as.character(res1$Category))
+res2 <- merge(res2, mat, by="gene", all.x=T)
+res2$Category <- ifelse(is.na(res2$Category) == T, "none", as.character(res2$Category))
+res3 <- merge(res3, mat, by="gene", all.x=T)
+res3$Category <- ifelse(is.na(res3$Category) == T, "none", as.character(res3$Category))
+res4 <- merge(res4, mat, by="gene", all.x=T)
+res4$Category <- ifelse(is.na(res4$Category) == T, "none", as.character(res4$Category))
+res5 <- merge(res5, mat, by="gene", all.x=T)
+res5$Category <- ifelse(is.na(res5$Category) == T, "none", as.character(res5$Category))
+
+df <- list()
+df2 <- list()
+stat1 <- as.data.frame(table(res1$perc.cnv,res1$tumor,res1$Category))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  for(k in c("Collagens","ECM-affiliated Proteins","ECM Glycoproteins","ECM Regulators","Proteoglycans","Secreted Factors")){
+    z2 <- subset(z, z$Var3==k)
+    z2 <- bind_rows(z2, subset(z,z$Var3=="none"))
+    z2 <- data.frame(source=unique(z2$Var3),rbind(z2$Freq[1:4],z2$Freq[5:8]))
+    rownames(z2) <- z2[,1]
+    z2[,1] <- NULL
+    z2 <- z2+1
+    ch <- chisq.test(z2,comple)
+    p <- ch$p.value
+    df[[k]] <- data.frame(tumor=i, matrisome.category=k, chi.square.Pvalue=p)
+  }
+  df2[[i]] <- bind_rows(df)
+}
+df2 <- bind_rows(df2)
+df2$CNA.type <- "total"
+df2 <- df2[order(df2$tumor),]
+sb1 <- df2
+
+df <- list()
+df2 <- list()
+stat1 <- as.data.frame(table(res2$perc.cnv,res2$tumor,res2$Category))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  for(k in c("Collagens","ECM-affiliated Proteins","ECM Glycoproteins","ECM Regulators","Proteoglycans","Secreted Factors")){
+    z2 <- subset(z, z$Var3==k)
+    z2 <- bind_rows(z2, subset(z,z$Var3=="none"))
+    z2 <- data.frame(source=unique(z2$Var3),rbind(z2$Freq[1:3],z2$Freq[4:6]))
+    rownames(z2) <- z2[,1]
+    z2[,1] <- NULL
+    z2 <- z2+1
+    ch <- chisq.test(z2,comple)
+    p <- ch$p.value
+    df[[k]] <- data.frame(tumor=i, matrisome.category=k, chi.square.Pvalue=p)
+  }
+  df2[[i]] <- bind_rows(df)
+}
+df2 <- bind_rows(df2)
+df2$CNA.type <- "deep amp"
+df2 <- df2[order(df2$tumor),]
+sb2 <- df2
+
+df <- list()
+df2 <- list()
+stat1 <- as.data.frame(table(res3$perc.cnv,res3$tumor,res3$Category))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  for(k in c("Collagens","ECM-affiliated Proteins","ECM Glycoproteins","ECM Regulators","Proteoglycans","Secreted Factors")){
+    z2 <- subset(z, z$Var3==k)
+    z2 <- bind_rows(z2, subset(z,z$Var3=="none"))
+    z2 <- data.frame(source=unique(z2$Var3),rbind(z2$Freq[1:5],z2$Freq[6:10]))
+    rownames(z2) <- z2[,1]
+    z2[,1] <- NULL
+    z2 <- z2+1
+    ch <- chisq.test(z2,comple)
+    p <- ch$p.value
+    df[[k]] <- data.frame(tumor=i, matrisome.category=k, chi.square.Pvalue=p)
+  }
+  df2[[i]] <- bind_rows(df)
+}
+df2 <- bind_rows(df2)
+df2$CNA.type <- "shallow amp"
+df2 <- df2[order(df2$tumor),]
+sb3 <- df2
+
+df <- list()
+df2 <- list()
+stat1 <- as.data.frame(table(res4$perc.cnv,res4$tumor,res4$Category))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  for(k in c("Collagens","ECM-affiliated Proteins","ECM Glycoproteins","ECM Regulators","Proteoglycans","Secreted Factors")){
+    z2 <- subset(z, z$Var3==k)
+    z2 <- bind_rows(z2, subset(z,z$Var3=="none"))
+    z2 <- data.frame(source=unique(z2$Var3),rbind(z2$Freq[1:5],z2$Freq[6:10]))
+    rownames(z2) <- z2[,1]
+    z2[,1] <- NULL
+    z2 <- z2+1
+    ch <- chisq.test(z2,comple)
+    p <- ch$p.value
+    df[[k]] <- data.frame(tumor=i, matrisome.category=k, chi.square.Pvalue=p)
+  }
+  df2[[i]] <- bind_rows(df)
+}
+df2 <- bind_rows(df2)
+df2$CNA.type <- "shallow del"
+df2 <- df2[order(df2$tumor),]
+sb4 <- df2
+
+df <- list()
+df2 <- list()
+stat1 <- as.data.frame(table(res5$perc.cnv,res5$tumor,res5$Category))
+for(i in unique(stat1$Var2)){
+  z <- subset(stat1, stat1$Var2==i)
+  for(k in c("Collagens","ECM-affiliated Proteins","ECM Glycoproteins","ECM Regulators","Proteoglycans","Secreted Factors")){
+    z2 <- subset(z, z$Var3==k)
+    z2 <- bind_rows(z2, subset(z,z$Var3=="none"))
+    z2 <- data.frame(source=unique(z2$Var3),rbind(z2$Freq[1:3],z2$Freq[4:6]))
+    rownames(z2) <- z2[,1]
+    z2[,1] <- NULL
+    z2 <- z2+1
+    ch <- chisq.test(z2,comple)
+    p <- ch$p.value
+    df[[k]] <- data.frame(tumor=i, matrisome.category=k, chi.square.Pvalue=p)
+  }
+  df2[[i]] <- bind_rows(df)
+}
+df2 <- bind_rows(df2)
+df2$CNA.type <- "deep del"
+df2 <- df2[order(df2$tumor),]
+sb5 <- df2
+
+fin <- bind_rows(sb1,sb2,sb3,sb4,sb5)
+fwrite(fin, "CNAs_subdivided by matrisome categories_chi square tests.csv", sep=",", row.names = F, quote = F)
+
+res2 <- subset(res2, !res2$Category == "none")
+tab2 <- as.data.frame(table(res2$perc.cnv, res2$tumor, res2$Category))
+colnames(tab2) <- c("binned.group", "tumor", "category","freq")
+res2 <- tab2
+res2$x <- 3
+res3 <- subset(res3, !res3$Category == "none")
+tab3 <- as.data.frame(table(res3$perc.cnv, res3$tumor, res3$Category))
+colnames(tab3) <- c("binned.group", "tumor", "category","freq")
+res3 <- tab3
+res3$x <- 4
+res4 <- subset(res4, !res4$Category == "none")
+tab4 <- as.data.frame(table(res4$perc.cnv, res4$tumor, res4$Category))
+colnames(tab4) <- c("binned.group", "tumor", "category","freq")
+res4 <- tab4
+res4$x <- 2
+res5 <- subset(res5, !res5$Category == "none")
+tab5 <- as.data.frame(table(res5$perc.cnv, res5$tumor, res5$Category))
+colnames(tab5) <- c("binned.group", "tumor", "category","freq")
+res5 <- tab5
+res5$x <- 1
+res <- bind_rows(res2,res3,res4,res5)
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+res <- merge(res,ac,by="tumor")
+res$cna <- ifelse(res$x==1, "Deep Del",
+                  ifelse(res$x==2, "Shallow Del",
+                         ifelse(res$x==3,"Deep Amp","Shallow Amp")))
+library(ggplot2)
+for(i in unique(res$tumor)){
+  z <- subset(res, res$tumor == i)
+  g <- ggplot(z, aes(x=x, y=freq, fill=R.colors)) + geom_bar(aes(alpha=binned.group),position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(z$R.colors))) + theme_classic() +
+    xlab("") + ylab("frequency of each binned CNV group") + scale_x_continuous(breaks = unique(z$x), labels = as.character(unique(z$cna))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+  g + facet_wrap(z$category, scales = "free")
+  nam <- paste("ALL CNAs by MATRISOME CATEGORY_",i,".jpg",sep="")
+  ggsave(nam, width = 10, height = 10, dpi = 300, units = "in")
+}
+
+```
+
+STEP 5: TRANSCRIPTIONAL CONSEQUENCES OF CNAs in MATRISOME
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+gis <- fin[[1]]
+gis$sample <- rownames(gis)
+p1 <- read.table("panc1.txt", header=T, sep="\t") #matrisome data from PANCAN#
+p2 <- read.table("panc2.txt", header=T, sep="\t")
+p3 <- read.table("panc3.txt", header=T, sep="\t")
+p4 <- read.table("panc4.txt", header=T, sep="\t")
+m <- merge(p1, p2, by="sample")
+m <- merge(m, p3, by="sample")
+m <- merge(m, p4, by="sample")
+m <- subset(m, m$sample %in% gis$sample)
+m <- m[, colnames(m) %in% colnames(gis)]
+gis <- gis[, colnames(gis) %in% colnames(m)]
+
+gis <- gis[,c(1008,1:1007)]
+gis <- gis[order(gis$sample),] #order the two frames similarly to prepare for the loop#
+m <- m[order(m$sample),]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+gis <- merge(gis, clin, by="sample")
+m <- merge(m, clin, by="sample")
+gis <- gis[,c(1009,1:1008)]
+m <- m[,c(1009,1:1008)]
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "cancer.type.abbreviation"
+
+gis <- subset(gis, gis$cancer.type.abbreviation %in% ac$cancer.type.abbreviation)
+m <- subset(m, m$cancer.type.abbreviation %in% ac$cancer.type.abbreviation)
+
+library(gtools) #this first loop evaluates which genes in each tumor type have enough samples for performing which differential analysis#
+res <- list()
+res2 <- list()
+for(i in unique(gis$cancer.type.abbreviation)){
+  z1 <- subset(gis, gis$cancer.type.abbreviation == i)
+  z2 <- subset(m, gis$cancer.type.abbreviation == i)
+  for(q in colnames(z1[2:ncol(z1)])){
+    s1 <- z1[,colnames(z1) %in% q]
+    s1 <- data.frame(sample=as.character(z1$sample), cna=s1)
+    s2 <- z2[,colnames(z2) %in% q]
+    s2 <- data.frame(sample=as.character(z2$sample), exp=s2)
+    fin <- merge(s1,s2,by="sample")
+    tab <- na.omit(fin)
+    tab <- as.data.frame(table(tab$cna))
+    tab <- subset(tab, !tab$Var1 == 0)
+    tab <- subset(tab, tab$Freq >=3)
+    if(nrow(tab) > 0){df <- data.frame(gene=q,cancer.type=i,n.of.evaluable.cna=nrow(tab))} else {df <- data.frame(gene=q,cancer.type=i,n.of.evaluable.cna=0)}
+    if(df$n.of.evaluable.cna > 0){df <- cbind(df,tab$Var1)} else {df <- data.frame(gene=q,cancer.type=i,n.of.evaluable.cna=0,'tab$Var1'="0")}
+    colnames(df)[4] <- "tab.Var1"
+    res2[[q]] <- df
+    }
+ res[[i]] <- bind_rows(res2)
+}
+res <- bind_rows(res)
+res <- distinct(res)
+analyzable.1 <- subset(res, res$n.of.evaluable.cna > 0)
+
+res <- list() #another evaluation step is needed to remove genes with no variance over tumor types (genes with all equal expression in sel and rest within a given tumor type/cna combination)#
+res2 <- list()
+res3 <- list()
+for(i in unique(analyzable.1$cancer.type)){
+  z <- subset(analyzable.1, analyzable.1$cancer.type==i)
+  for(q in unique(z$gene)){
+    z2 <- subset(z, z$gene == q)
+    for(w in 1:nrow(z2)){
+      z3 <- z2[w,]
+      gis2 <- subset(gis, gis$cancer.type.abbreviation==i)
+      gis2 <- data.frame(sample=gis2$sample, target=gis2[,which(colnames(gis2)%in%q)])
+      rest <- subset(gis2, gis2$target == 0)
+      m.rest <- subset(m, m$sample %in% rest$sample)
+      m.rest <- m.rest[,which(colnames(m.rest) %in% q)]
+      var0 <- var(m.rest,na.rm = T)
+      test <- subset(gis2, gis2$target == z3$tab.Var1)
+      m.test <- subset(m, m$sample %in% test$sample)
+      m.test <- m.test[,which(colnames(m.test) %in% q)]
+      var1 <- var(m.test,na.rm = T)
+      df <- data.frame(z3, variance.of.gene=var1, variance.of.rest=var0)
+      counter <- paste(i,q,w,sep="_")
+      res3[[counter]] <- df
+    }
+    res2 <- bind_rows(res3)
+  }
+  res <- bind_rows(res2)
+}
+res <- bind_rows(res)  
+res <- res[res$variance.of.gene>0 & res$variance.of.rest>0,]
+prova <- res
+prova <- na.omit(prova)
+
+res <- list() #based on the evaluation loops, now this third loop runs the differential analysis#
+for(i in 1:nrow(prova)){
+  l <- prova[i,]
+  z1 <- subset(gis, gis$cancer.type.abbreviation %in% l$cancer.type)
+  z1 <- data.frame(sample=z1$sample, cna=z1[,which(colnames(z1) %in% l$gene)])
+  rest <- subset(z1, z1$cna == 0)
+  rest <- rest$sample
+  test <- subset(z1, z1$cna == l$tab.Var1)
+  test <- test$sample
+  z2 <- subset(m, m$cancer.type.abbreviation %in% l$cancer.type)
+  z2 <- data.frame(sample=z2$sample, m=z2[,which(colnames(z2) %in% l$gene)])
+  rest <- na.omit(subset(z2, z2$sample %in% rest))
+  test <- na.omit(subset(z2, z2$sample %in% test))
+  tt <- t.test(test$m, rest$m)
+  fc <- foldchange2logratio(foldchange(mean(test$m), mean(rest$m)))
+  df <- data.frame(gene=l$gene,cancer.type=l$cancer.type, cna=l$tab.Var1,log2_FC=fc, pval=format.pval(tt$p.value))
+  res[[i]] <- df
+}
+val <- bind_rows(res)
+val <- unique(val)
+val <- subset(val, val$pval < 0.05)
+val$concordance <- ifelse(val$cna>0 & val$log2_FC>=0, "UP",ifelse(val$cna<0 & val$log2_FC<=-0, "DOWN", "ns"))  
+val <- subset(val, !val$concordance == "ns")
+val$concordance <- NULL
+val$evaluation <- ifelse(val$log2_FC > 0.585 | val$log2_FC < -1, ">50% increase or decrease", "weak increase or decrease")
+fwrite(val, "all_CNAs_with effect on transcription.csv", sep=",", row.names = F, quote = F)
+
+#further breakdown by matrisome categories#
+mn <- read.table("matrisome_hs.txt", header=T, sep="\t") #cut to matrisome genes#
+dat <- val
+dat <- merge(mn,dat,by.x="Gene.Symbol",by.y="gene")
+mat1 <- list()
+mat2 <- list()
+for(i in unique(dat$cancer.type)){
+  z <- subset(dat, dat$cancer.type == i)
+  z2 <- subset(z, !z$evaluation=="weak increase or decrease")
+  tab1 <- as.data.frame(table(z$Category))
+  tab2 <- as.data.frame(table(z2$Category))
+  df <- data.frame(cancer.type=i, t(tab1$Freq))
+  colnames(df)[2:ncol(df)] <- as.character(tab1$Var1)
+  df2 <- data.frame(cancer.type=i, t(tab2$Freq))
+  colnames(df2)[2:ncol(df2)] <- as.character(tab2$Var1)
+  mat1[[i]] <- df
+  mat2[[i]] <- df2
+}
+mat1 <- bind_rows(mat1)
+mat2 <- bind_rows(mat2)
+rownames(mat1) <- mat1[,1]
+mat1[,1] <- NULL
+rownames(mat2) <- mat2[,1]
+mat2[,1] <- NULL
+ch1 <- chisq.test(mat1)
+ch2 <- chisq.test(mat2)
+df <- data.frame(test=c("all genes", "only genes with 50% increase or decrease"), Pvalue=c(ch1$p.value, ch2$p.value))
+fwrite(df, "CNA_effect on transcription_Chi squared according to the matrisome categories.csv",sep=",",row.names = F,quote = F)
+#library(pheatmap)
+#pheatmap(mat1, filename = "CNAs_breakdown of all by matrisome cateogries.jpg")
+#pheatmap(mat2, filename = "CNAs_breakdown of significant effect on transcription by matrisome cateogries.jpg")
+
+mat1 <- list() #further breakdown, only CNAs with positive effects on transcription#
+mat2 <- list()
+for(i in unique(dat$cancer.type)){
+  z <- subset(dat, dat$cancer.type == i)
+  z2 <- subset(z, !z$evaluation=="weak increase or decrease")
+  z <- subset(z, z$log2_FC > 0)
+  z <- subset(z, z2$log2_FC > 0)
+  tab1 <- as.data.frame(table(z$Category))
+  tab2 <- as.data.frame(table(z2$Category))
+  df <- data.frame(cancer.type=i, t(tab1$Freq))
+  colnames(df)[2:ncol(df)] <- as.character(tab1$Var1)
+  df2 <- data.frame(cancer.type=i, t(tab2$Freq))
+  colnames(df2)[2:ncol(df2)] <- as.character(tab2$Var1)
+  mat1[[i]] <- df
+  mat2[[i]] <- df2
+}
+mat1 <- bind_rows(mat1)
+mat2 <- bind_rows(mat2)
+rownames(mat1) <- mat1[,1]
+mat1[,1] <- NULL
+rownames(mat2) <- mat2[,1]
+mat2[,1] <- NULL
+ch1 <- chisq.test(mat1)
+ch2 <- chisq.test(mat2)
+df <- data.frame(test=c("all genes", "only genes with 50% increase or decrease"), Pvalue=c(ch1$p.value, ch2$p.value))
+fwrite(df, "CNA_effect on transcription_ONLY POSITIVE__Chi squared according to the matrisome categories.csv",sep=",",row.names = F,quote = F)
+library(pheatmap)
+pheatmap(mat1, filename = "CNAs_breakdown of all by matrisome cateogries_ONLY POSITIVE.jpg")
+pheatmap(mat2, filename = "CNAs_breakdown of significant effect on transcription by matrisome cateogries_ONLY POSITIVE.jpg")
+
+mat1 <- list() #further breakdown, only CNAs with negative effects on transcription#
+mat2 <- list()
+for(i in unique(dat$cancer.type)){
+  z <- subset(dat, dat$cancer.type == i)
+  z2 <- subset(z, !z$evaluation=="weak increase or decrease")
+  z <- subset(z, z$log2_FC < 0)
+  z <- subset(z, z2$log2_FC < 0)
+  tab1 <- as.data.frame(table(z$Category))
+  tab2 <- as.data.frame(table(z2$Category))
+  df <- data.frame(cancer.type=i, t(tab1$Freq))
+  colnames(df)[2:ncol(df)] <- as.character(tab1$Var1)
+  df2 <- data.frame(cancer.type=i, t(tab2$Freq))
+  colnames(df2)[2:ncol(df2)] <- as.character(tab2$Var1)
+  mat1[[i]] <- df
+  mat2[[i]] <- df2
+}
+mat1 <- bind_rows(mat1)
+mat2 <- bind_rows(mat2)
+rownames(mat1) <- mat1[,1]
+mat1[,1] <- NULL
+rownames(mat2) <- mat2[,1]
+mat2[,1] <- NULL
+ch1 <- chisq.test(mat1)
+ch2 <- chisq.test(mat2)
+df <- data.frame(test=c("all genes", "only genes with 50% increase or decrease"), Pvalue=c(ch1$p.value, ch2$p.value))
+fwrite(df, "CNA_effect on transcription_ONLY NEGATIVE__Chi squared according to the matrisome categories.csv",sep=",",row.names = F,quote = F)
+pheatmap(mat1, filename = "CNAs_breakdown of all by matrisome cateogries_ONLY NEGATIVE.jpg")
+pheatmap(mat2, filename = "CNAs_breakdown of significant effect on transcription by matrisome cateogries_ONLY NEGATIVE.jpg")
+
+val2 <- subset(val, val$evaluation == ">50% increase or decrease") #graphs for the more robust results
+inc <- subset(val2, val2$log2_FC > 0)
+dec <- subset(val2, val2$log2_FC < 0)
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+names(mat)[3] <- "gene"
+inc <- merge(inc, mat, by="gene")
+dec <- merge(dec, mat, by="gene")
+t.inc <- as.data.frame(table(inc$cancer.type, inc$Division))
+t.dec <- as.data.frame(table(dec$cancer.type, dec$Division))
+
+res.inc <- list()
+for(i in unique(t.inc$Var1)){
+  z <- subset(t.inc, t.inc$Var1==i)
+  s <- sum(z[,3])
+  z$perc <- round((z[,3]/s)*100,2)
+  res.inc[[i]] <- z
+}
+res.inc <- bind_rows(res.inc)
+res.inc$col <- ifelse(res.inc$Var2=="Core matrisome","darkslateblue","coral2")
+
+library(ggplot2)
+ggplot(res.inc, aes(x=Var1, y=perc, fill=Var2)) + geom_bar(position="stack", stat="identity") + 
+  scale_fill_manual(values = as.character(res.inc$col)) + theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 5)) +
+  xlab("") + ylab("percentage of total CNAs with \neffect on transcription") + ylim(c(0,100))
+ggsave("CNAs_positive effect on transcription.jpg")
+
+res.dec <- list()
+for(i in unique(t.dec$Var1)){
+  z <- subset(t.dec, t.dec$Var1==i)
+  s <- sum(z[,3])
+  z$perc <- round((z[,3]/s)*100,2)
+  res.dec[[i]] <- z
+}
+res.dec <- bind_rows(res.dec)
+res.dec$col <- ifelse(res.dec$Var2=="Core matrisome","darkslateblue","coral2")
+
+ggplot(res.dec, aes(x=Var1, y=perc, fill=Var2)) + geom_bar(position="stack", stat="identity") + 
+  scale_fill_manual(values = as.character(res.dec$col)) + theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 5)) +
+  xlab("") + ylab("percentage of total CNAs with \neffect on transcription") + ylim(c(0,100))
+ggsave("CNAs_negative effect on transcription.jpg")
+
+stat1 <- list()
+for(i in unique(res.inc$Var1)){
+  z <- subset(res.inc, res.inc$Var1 == i)
+  z <- z[,c(2,3)]
+  names(z)[2] <- i
+  rownames(z) <- z[,1]
+  z[,1] <- NULL
+  stat1[[i]] <- z
+}
+stat1 <- bind_cols(stat1)
+ch1 <- chisq.test(stat1)
+stat1 <- list()
+for(i in unique(res.dec$Var1)){
+  z <- subset(res.dec, res.dec$Var1 == i)
+  z <- z[,c(2,3)]
+  names(z)[2] <- i
+  rownames(z) <- z[,1]
+  z[,1] <- NULL
+  stat1[[i]] <- z
+}
+stat1 <- bind_cols(stat1)
+ch2 <- chisq.test(stat1)
+df <- data.frame(test=c("CNA_positive effect", "CNA_negative effect"), Pvalue=c(ch1$p.value, ch2$p.value))
+fwrite(df, "CNAs_effect on transcription by matrisome classes.csv", sep=",", row.names = F, quote = F)
+
+res <- list()
+res2 <- list()
+for(i in unique(gis$cancer.type.abbreviation)){
+  z <- subset(gis,gis$cancer.type.abbreviation == i)
+  for(q in 3:ncol(z)){
+    z2 <- z[,q]
+    z2 <- as.data.frame(table(z2))
+    z2 <- z2[!z2["z2"]==0,]
+    z2 <- sum(z2$Freq)
+    res[[q]] <- data.frame(tumor=i,gene=names(z)[q],total.cnas=z2)
+  }
+  res2[[i]] <- bind_rows(res)
+}
+res2 <- bind_rows(res2)
+
+tab <- as.data.frame(table(dat$cancer.type,dat$Gene.Symbol))
+names(tab)[1] <- "tumor"
+names(tab)[2] <- "gene"
+m <- merge(res2,tab,by=c("tumor","gene"))
+m$fin <- m$total.cnas-m$Freq
+m <- merge(m,mn,by.x="gene",by.y="Gene.Symbol")
+res <- list()
+for(i in m$tumor){
+  z <- subset(m, m$tumor == i)
+  z2 <- aggregate.data.frame(z$fin, list(z$Division), sum)
+  colnames(z2) <- c("Division","tots")
+  z2$tumor <- i
+  res[[i]] <- z2
+}
+res <- bind_rows(res)
+res$col <- ifelse(res$Division=="Core matrisome","darkslateblue","coral2")
+
+ggplot(res, aes(x=tumor, y=tots, fill=Division)) + geom_bar(position="fill", stat="identity") + 
+  scale_fill_manual(values = as.character(res$col)) + theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 5)) + scale_y_continuous(breaks = c(0,0.25,0.5,0.75,1),labels = c(0,25,50,75,100)) +
+  xlab("") + ylab("percentage of total CNAs with \nno effect on transcription")
+ggsave("CNAs_no effect on transcription.jpg")
+
+m2 <- aggregate(m$fin,list(m$tumor,m$Category),sum)
+res <- list()
+for(i in unique(m2$Group.1)){
+  z <- subset(m2,m2$Group.1==i)
+  df <- data.frame(tumor=i,t(z$x))
+  names(df)[2:ncol(df)] <- z$Group.2
+  res[[i]] <- df
+}
+res <- bind_rows(res)
+rownames(res) <- res[,1]
+res[,1] <- NULL
+pheatmap(res,filename = "CNAs_no effect by tumor type.jpg")
+
+fwrite(dat, "Table_CNAs found.txt", sep="\t", row.names = F, quote = F)
+
+```
+
+STEP 6: MATRISOME MUTATIONS AND THEIR RELATIONSHIP WITH GENE LENGTH vs. REST OF THE GENOME
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #get data#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7,2:6,8:12)]
+
+mut <- fread("mc3.v0.2.8.PUBLIC.xena.txt", header=T, sep="\t") #all mutated genes, use the same source as rest of the genome to avoid pre-processing bias#
+mut <- as.data.frame(mut)
+nmut <- subset(mut, mut$gene %in% unique(m$gene))
+nmut <- as.data.frame(table(nmut$gene))
+nmut <- subset(nmut, !nmut$Freq == 0)
+genes <- as.character(nmut[,1])
+
+library(goseq)
+nmut$l<- getlength(genes,'hg19','geneSymbol')
+nmut <- na.omit(nmut)
+mut <- subset(mut, !mut$gene %in% nmut$Var1) #all non-matrisome genes#
+nmut2 <- as.data.frame(table(mut$gene))
+nmut2 <- subset(nmut2, !nmut2$Freq == 0)
+genes <- as.character(nmut2[,1])
+nmut2$l<- getlength(genes,'hg19','geneSymbol')
+nmut2 <- na.omit(nmut2)
+nmut2$col <- "gray80"
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+nmut <- merge(nmut, mat, by.x="Var1", by.y="Gene.Symbol")
+nmut$col <- ifelse(nmut$Division == "Core matrisome", "darkslateblue", "coral2")
+nmut <- nmut[,c(1:3,6)]
+
+fin <- bind_rows(nmut, nmut2)
+fin$type <- ifelse(fin$col == "darkslateblue", "core matrisome",
+                   ifelse(fin$col=="coral2", "matrisome-associated", "rest of genome"))
+res.aov <- aov(l ~ type, data = fin)
+pval <- format.pval(summary(res.aov)[[1]][["Pr(>F)"]][[1]])
+pval <- paste("ANOVA p-value:", pval, sep=" ")
+df <- data.frame(test="ANOVA_N.of.mutations", Pval=pval)
+fwrite(df, "MUTATION_effect of length.csv", sep=",", row.names = F, quote = F)
+
+library(ggplot2)
+p <- ggplot(fin, aes(x=type, y=l, fill=type)) + 
+  geom_violin(scale="width") + 
+  scale_fill_manual(values=c("darkslateblue","coral2","grey80")) +
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, size = 6, vjust = 0.4)) +
+  xlab("") + ylab("Gene length") + 
+  stat_summary(fun=mean, geom="point", size=1.3, color="black") + 
+  annotate("text", x = 2, y = 70000, label = pval)
+p
+ggsave("violin plot_gene length.jpg")
+
+p <- ggplot(fin, aes(x=type, y=(Freq/l), fill=type)) + 
+  geom_violin(scale="width") + 
+  scale_fill_manual(values=c("darkslateblue","coral2","grey80")) +
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, size = 6, vjust = 0.4)) +
+  xlab("") + ylab("Gene / length ratio") + 
+  stat_summary(fun=mean, geom="point", size=1.3, color="black") + 
+  annotate("text", x = 2, y = 0.70, label = pval)
+p
+ggsave("violin plot_ratio mut by gene length.jpg")
+
+#additional tests to claim differences in mutation rates#
+linearMod <- lm(Freq ~ l, data=nmut) #linear model, length vs number of mut in matrisome. Of course it's significant, see also the correlation below#
+summary(linearMod)
+ct <- cor.test(nmut$Freq, nmut$l)
+ann <- paste("Correlation: ",round(ct$estimate,3), ", P value:", format.pval(ct$p.value),sep="")
+scatter.smooth(x=nmut$l, y=nmut$Freq, xlab = c("gene length"), ylab = c("n of mutations"),
+               main="Gene length vs. n of mutations - MATRISOME")  # scatterplot
+text(20000, 2000, ann)
+
+mut <- subset(mut, !mut$gene %in% nmut$Var1) #all non-matrisome genes#
+nmut2 <- as.data.frame(table(mut$gene))
+nmut2 <- subset(nmut2, !nmut2$Freq == 0)
+genes <- as.character(nmut2[,1])
+nmut2$l<- getlength(genes,'hg19','geneSymbol')
+nmut2 <- na.omit(nmut2)
+
+linearMod <- lm(Freq ~ l, data=nmut2) #linear model, length vs number of mut in non-matrisome. Of course it's again significant, see also the correlation below#
+summary(linearMod)
+ct <- cor.test(nmut2$Freq, nmut2$l)
+ann <- paste("Correlation: ",round(ct$estimate,3), ", P value:", format.pval(ct$p.value),sep="")
+scatter.smooth(x=nmut2$l, y=nmut2$Freq, xlab = c("gene length"), ylab = c("n of mutations"),
+               main="Gene length vs. n of mutations - NOT MATRISOME")  # scatterplot
+text(40000, 5000, ann)
+
+r1 <- nmut$Freq/nmut$l #ratios of n mut vs. length, in matrisome and rest#
+r2 <- nmut2$Freq/nmut2$l
+wt <- wilcox.test(r1,r2) #robust t.test (equal to Mann-Whitney test)#
+r1 <- log10(nmut$Freq/nmut$l) #ratios of n mut vs. length, in matrisome and rest. Logs for nicer look in the graph#
+r2 <- log10(nmut2$Freq/nmut2$l)
+boxplot(r1,r2, main="N Mutations vs gene length in comparison",
+        xlab="", ylab="-log10(N mut/length)", col=(c("gold","darkgreen")), ylim=c(-4,2), names = c("matrisome", "rest"))
+ann <- paste("P value:", format.pval(wt$p.value),sep=" ")
+text(1.5, 1, ann)
+library(gtools)
+r1 <- nmut$Freq/nmut$l
+r2 <- nmut2$Freq/nmut2$l
+fc <- round(foldchange(mean(r1),mean(r2)),2)
+text(1.5, 1.5, paste("actual fold-change (matrisome vs. rest):",fc,sep=" "))
+
+nmut$source <- "matrisome"
+nmut2$source <- "rest"
+plot(density(nmut2$l)) #total of lengths, if one wants it as an inset#
+lines(density(nmut$l))
+abline(v=20000, col="red")
+
+dat <- bind_rows(nmut,nmut2) #density distribution#
+library(ggplot2)
+ggplot(dat, aes(x = l, fill = source)) + geom_density(alpha = 0.5) + theme_bw() + xlim(c(-0.5,20000)) + xlab("gene length")
+
+wt <- wilcox.test(nmut$l,nmut2$l) #robust t.test (equal to Mann-Whitney test) for lengths#
+boxplot(nmut$l,nmut2$l, main="Gene lengths in comparison",
+        xlab="", ylab="length", col=(c("gold","darkgreen")), names = c("matrisome", "rest"))
+ann <- paste("P value:", format.pval(wt$p.value),sep=" ")
+text(1.5, 60000, ann)
+fc <- round(foldchange(mean(nmut$l),mean(nmut2$l)),2)
+text(1.5, 70000, paste("actual fold-change (matrisome vs. rest):",fc,sep=" "))
+
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t") #import annotations to evaluate mut/length ratios per matrisome family#
+library(gtools)
+res <- list()
+r2 <- nmut2$Freq/nmut2$l
+for(i in unique(mat$Category)){
+  z <- subset(mat, mat$Category == i)
+  sel <- as.character(unique(z$Gene.Symbol))
+  n1 <- subset(nmut, nmut$Var1 %in% sel)
+  r1 <- n1$Freq/n1$l
+  
+  r1 <- mean(r1, na.rm = T)
+  r2 <- mean(r2, na.rm = T)
+  
+  df <- data.frame(category=c(i,"rest of genome"),value=c(r1,r2))
+  
+  res[[i]] <- df
+}
+res <- bind_rows(res)
+res$x <- rep(1:6, each=2)
+res$y <- rep(c(1.75,1.5))
+res$nvalue <- -log10(res$value)
+
+library(ggplot2)
+p <- ggplot(res, aes(x,y,colour=as.factor(category))) 
+p + geom_point(aes(size=nvalue),shape=21, colour="black", fill=rep(pal_nejm("default")(6),each=2)) +
+  theme_classic() +
+  scale_y_continuous(breaks=unique(res$y), labels=c("matrisome","rest of genome"), limits = c(1.48,1.57)) +
+  scale_x_continuous(breaks=unique(res$x), labels=as.character(unique(mat$Category))) +
+  theme(axis.text.x = element_text(angle = 90, size = 6, vjust = 0.4), axis.text.y = element_text(size=8)) +
+  xlab("") + ylab("Log10 (N of mutations / gene length)")
+ggsave("MUTATIONS_effect of length by matrisome category_bubbleplot.jpg")
+
+#another way to report differences at the matrisome category level#
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t") #import annotations to see mut/length ratios per matrisome family#
+r2 <- nmut2$Freq/nmut2$l
+for(i in unique(mat$Category)){
+  z <- subset(mat, mat$Category == i)
+  sel <- as.character(unique(z$Gene.Symbol))
+  n1 <- subset(nmut, nmut$Var1 %in% sel)
+  r1 <- n1$Freq/n1$l
+  wt <- wilcox.test(r1,r2)
+  fc <- round(foldchange(mean(r1),mean(r2)),2)
+  r1 <- log10(r1)
+  r2 <- log10(r2)
+  mn <- min(min(r1), min(r2))
+  mx <- max(max(r1), max(r2))
+  tit <- paste("mut ratios vs. length_",i,sep="")
+  mn <- mn-0.5
+  mx <- mx+2
+  ex <- paste(tit, ".jpg", sep="")
+  tiff(file=ex)
+  boxplot(r1,r2, main=tit,
+          xlab="", ylab="length", col=(c("gold","darkgreen")), ylim=c(mn,mx) ,names = c("matrisome", "rest"))
+  ann <- paste("P value:", format.pval(wt$p.value),sep=" ")
+  text(1.5, mx-1, ann)
+  text(1.5, mx-0.5, paste("actual fold-change:",fc,sep=" "))
+  dev.off()
+  r2 <- nmut2$Freq/nmut2$l
+}
+
+#test by random splits in the rest of the genome - part 1: 1/3 of the genome as random splits#
+res <- list()
+r1 <- nmut$Freq/nmut$l
+for(i in 1:1000){
+  r2 <- nmut2[sample(nrow(nmut2), round(nrow(nmut2)/3)), ]
+  r2 <- r2$Freq/r2$l
+  wt <- wilcox.test(r1,r2)
+  fc <- round(foldchange(mean(r1),mean(r2)),2)
+  res[[i]] <- data.frame(wt=wt$p.value,fc=fc)
+  print(i)
+}
+res <- bind_rows(res)
+n <- nrow(subset(res,res$wt < 0.05))
+tots <- data.frame(n_positive_tests=n, mean_FC=mean(res$fc), criterion="P<0.05", n_random_splits=1000, size_of_non_matrisome="1/3 of genome")
+
+#test by random splits in the rest of the genome - part 2: gene sets the same size as matrisome#
+res <- list()
+r1 <- nmut$Freq/nmut$l
+for(i in 1:1000){
+  r2 <- nmut2[sample(nrow(nmut2), 333), ]
+  r2 <- r2$Freq/r2$l
+  wt <- wilcox.test(r1,r2)
+  fc <- round(foldchange(mean(r1),mean(r2)),2)
+  res[[i]] <- data.frame(wt=wt$p.value,fc=fc)
+  print(i)
+}
+res <- bind_rows(res)
+n <- nrow(subset(res,res$wt < 0.05))
+tots2 <- data.frame(n_positive_tests=n, mean_FC=mean(res$fc), criterion="P<0.05", n_random_splits=1000, size_of_non_matrisome="same as matrisome")
+
+#test by random splits in the rest of the genome - part 3: gene sets with average length >= average length matrisome#
+res <- list()
+ml <- mean(nmut$l)
+nmut3 <- subset(nmut2, nmut2$l >= ml)
+r1 <- nmut$Freq/nmut$l
+for(i in 1:1000){
+  r2 <- nmut3[sample(nrow(nmut3), round(nrow(nmut3)/3)), ]
+  r2 <- r2$Freq/r2$l
+  wt <- wilcox.test(r1,r2)
+  fc <- round(foldchange(mean(r1),mean(r2)),2)
+  res[[i]] <- data.frame(wt=wt$p.value,fc=fc)
+  print(i)
+}
+res <- bind_rows(res)
+n <- nrow(subset(res,res$wt < 0.05))
+tots3 <- data.frame(n_positive_tests=n, mean_FC=mean(res$fc), criterion="P<0.05", n_random_splits=1000, size_of_non_matrisome="random (but >= matrisome)")
+
+fin <- bind_rows(tots,tots2,tots3)
+fin <- fin[,c(4,1:3,5:ncol(fin))]
+fwrite(fin, "MUTATION_effect of length_further tests by random splits.csv", sep=",", row.names = F, quote = F)
+
+
+```
+
+STEP 7: TYPES OF MUTATIONS WITHIN MATRISOME GENES
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+mut <- fread("mc3.v0.2.8.PUBLIC.xena.txt", header=T, sep="\t")
+mut <- as.data.frame(mut)
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+names(mat)[3] <- "gene"
+mut <- subset(mut, mut$gene %in% mat$gene)
+clin <- fread("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- as.data.frame(clin)
+clin <- clin[,c(1,3)]
+tot <- merge(mut, clin, by="sample")
+tot$SIFT <- NULL 
+tot$PolyPhen <- NULL
+tot <- merge(tot, mat, by="gene")
+library(ggsci)
+col2 <- unique(c(pal_aaas("default")(10), pal_nejm("default")(10)))
+col2 <- data.frame(effect = unique(tot$effect), col=col2[2:18])
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+tot <- subset(tot, tot$`cancer type abbreviation` %in% ac$tumor)
+
+library(ggplot2) #pie charts for mutations in each cancer type#
+for(i in unique(tot$'cancer type abbreviation')){
+  z <- subset(tot, tot$'cancer type abbreviation' == i)
+  z <- as.data.frame(table(z$effect))
+  z <- merge(z,col2,by.y="effect",by.x="Var1")
+  g <- ggplot(z, aes(x="", y=Freq, fill=Var1)) + geom_bar(width = 1, stat = "identity") + scale_fill_manual(breaks = z$Var1, values = as.character(z$col)) + coord_polar("y", start=0, direction=-1) + theme_void()
+  nam <- paste("Mutations_",i,"_pie chart",".jpg",sep="")
+  ggsave(nam, width = 6.8, height = 6.4, units = "in")
+}
+
+for(i in unique(tot$`cancer type abbreviation`)){
+  z <- subset(tot, tot$`cancer type abbreviation`== i)
+  n <- as.data.frame(table(z$effect, z$Category))
+  n$x <- ifelse(n$Var2=="ECM Glycoproteins",1,
+                ifelse((n$Var2)=="Collagens",2,
+                ifelse((n$Var2)=="Proteoglycans",3,
+                ifelse((n$Var2)=="ECM-affiliated Proteins",4,
+                ifelse((n$Var2)=="ECM Regulators",5,6)))))
+  names(n)[1] <- "effect"
+  names(n)[2] <- "category"
+  n <- merge(n,col2, by="effect")
+  g <- ggplot(n, aes(x=x, y=Freq, fill=effect)) + geom_bar(position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(n$col))) + theme_classic() +
+    xlab("") + ylab("frequency of each mutation type") + scale_x_continuous(breaks = unique(n$x), labels = as.character(unique(n$category))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+  nam <- paste("ALL MUTATIONS by EFFECT_",i,".jpg",sep="")
+  g
+  ggsave(nam, width = 10, height = 10, dpi = 300, units = "in")
+}
+
+df <- list()
+df2 <- list()
+for(i in unique(tot$`cancer type abbreviation`)){
+  z <- subset(tot, tot$`cancer type abbreviation`== i)
+  n <- as.data.frame(table(z$effect, z$Category))
+  names(n)[1] <- "effect"
+  names(n)[2] <- "category"
+  for(k in unique(n$category)){
+    n2 <- subset(n, n$category == k)
+    n3 <- data.frame(category=k, t(n2$Freq))
+    colnames(n3)[2:ncol(n3)] <- as.character(n2$effect)
+    df[[k]] <- n3
+  }
+  df2[[i]] <- bind_rows(df)
+}
+df2 <- bind_rows(df2)
+df2[is.na(df2)] <- 0
+df2$tumor <- rep(unique(tot$`cancer type abbreviation`), each=6)
+
+df <- list()
+for(i in unique(df2$tumor)){
+  z <- subset(df2, df2$tumor == i)
+  z[,1] <- NULL
+  z$tumor <- NULL
+  z <- z+1
+  ch <- chisq.test(z)
+  df[[i]] <- data.frame(tumor=i, Pvalue=ch$p.value)
+}
+df <- bind_rows(df)
+fwrite(df, "MUTATIONS_effect by tumor.csv", sep=",", row.names = F, quote = F)
+
+
+col2 <- unique(c(pal_aaas("default")(10), pal_nejm("default")(10)))
+col2 <- data.frame(effect = unique(m$effect), col=col2[-1])
+for(i in unique(m$cancer.type.abbreviation)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  z <- subset(z, !z$effect == "Silent")
+  z <- as.data.frame(table(z$effect))
+  names(z)[1] <- "effect"
+  z <- merge(z,col2, by="effect")
+  g <- ggplot(z, aes(x="", y=Freq, fill=effect)) + geom_bar(width = 1, stat = "identity") + scale_fill_manual(values = as.character(z$col)) + coord_polar("y", start=0, direction=-1) + theme_void()
+  nam <- paste("Mutations_",i,"_by effect","_pie chart",".jpg",sep="")
+  ggsave(nam)
+}
+
+```
+
+STEP 8: TRANSITIONS AND TRANSVERSIONS
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "Tumor.type"
+
+m <- subset(m, m$cancer.type.abbreviation %in% ac$Tumor.type)
+m <- subset(m, !nchar(m$reference) > 1)
+m <- subset(m, !nchar(m$alt) > 1)
+m <- subset(m, !m$reference == "-")
+m <- subset(m, !m$alt == "-")
+
+m$mut.type <- paste0(m$reference,m$alt)
+m$mut.type <- ifelse(m$mut.type == "AC", "transversions", ifelse(m$mut.type == "CA", "transversions", ifelse(m$mut.type == "GT", "transversions", ifelse(m$mut.type == "TG", "transversions", "transitions"))))
+
+tots <- as.data.frame(table(m$cancer.type.abbreviation, m$mut.type))
+tots <- subset(tots, tots$Freq > 0)
+library(ggplot2)
+library(ggsci)
+ggplot(tots, aes(fill=Var2, y=Freq, x=Var1)) + geom_bar(position="fill", stat="identity") + scale_fill_simpsons() +
+    theme_classic() + xlab("") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3, size = 6))
+ggsave("transitions and transversions_total.jpg")
+
+res <- list()
+for(i in tots$Var1){
+  z <- subset(tots, tots$Var1 == i)
+  df <- data.frame(tumor=i, t(z$Freq))
+  colnames(df)[2:3] <- as.character(z$Var2)
+  res[[i]] <- df
+}
+res <- bind_rows(res)
+
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+names(mat)[3] <- "gene"
+mut <- subset(mut, mut$gene %in% mat$gene)
+m <- merge(m, mat, by="gene")
+
+res2 <- list()
+for(i in unique(m$cancer.type.abbreviation)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  z <- as.data.frame(table(z$Category, z$mut.type))
+  
+  z$x <- ifelse(z$Var1=="ECM Glycoproteins",1,
+                ifelse((z$Var1)=="Collagens",2,
+                       ifelse((z$Var1)=="Proteoglycans",3,
+                              ifelse((z$Var1)=="ECM-affiliated Proteins",4,
+                                     ifelse((z$Var1)=="ECM Regulators",5,6)))))
+  
+  ggplot(z, aes(fill=Var2, y=Freq, x=x)) + geom_bar(position="fill", stat="identity") + scale_fill_simpsons() +
+      theme_classic() + xlab("") + 
+    scale_x_continuous(breaks = z$x, labels = as.character(z$Var1)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3, size = 6))
+  ggsave(paste0("transitions and transversions_",i,".jpg"))
+  
+  df <- data.frame(tumor=i, t(z$Freq))
+  colnames(df)[2:ncol(df)] <- as.character(paste(z$Var1,z$Var2,sep="_"))
+  res2[[i]] <- df
+}
+res2 <- bind_rows(res2)
+
+ch <- chisq.test(res[,c(2:3)])
+p1 <- format.pval(ch$p.value)
+ch <- chisq.test(res2[,c(2:ncol(res2))])
+p2 <- format.pval(ch$p.value)
+
+df <- data.frame(test=c("total","by matrisome category"),Pvalue=c(p1,p2))
+fwrite(df, "TRANSITIONS AND TRANSVERSIONS_statistics.csv", sep=",", row.names = F, quote = F)
+
+#run the loop once more, this time for formatting the table that might eventually go into the article
+
+res2 <- list()
+for(i in unique(m$cancer.type.abbreviation)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  z <- as.data.frame(table(z$Category, z$mut.type))
+  
+  z$x <- ifelse(z$Var1=="ECM Glycoproteins",1,
+                ifelse((z$Var1)=="Collagens",2,
+                       ifelse((z$Var1)=="Proteoglycans",3,
+                              ifelse((z$Var1)=="ECM-affiliated Proteins",4,
+                                     ifelse((z$Var1)=="ECM Regulators",5,6)))))
+  z$y <- ifelse(z$Var2=="transitions",1,2)
+  z <- z[order(z$y,z$x),]
+  z$x <- NULL
+  z$y <- NULL
+  
+  df <- data.frame(tumor=i, t(z$Freq))
+  colnames(df)[2:ncol(df)] <- c(1:12)
+  res2[[i]] <- df
+}
+res2 <- bind_rows(res2)
+fwrite(res2, "TRANSITIONS AND TRANSVERSIONS_table.csv", sep=",", row.names = F, quote = F)
+
+
+```
+
+STEP 9: PREDICTED POLYPHEN CLASSES OF MUTATIONS WITHIN MATRISOME GENES
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+mut <- fread("mc3.v0.2.8.PUBLIC.xena.txt", header=T, sep="\t")
+mut <- as.data.frame(mut)
+bk <- mut #will be used later to evaluate polyphen at a more global level#
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+names(mat)[3] <- "gene"
+mut <- subset(mut, mut$gene %in% mat$gene)
+clin <- fread("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- as.data.frame(clin)
+clin <- clin[,c(1,3)]
+tot <- merge(mut, clin, by="sample")
+tot$SIFT <- NULL 
+tot$effect <- NULL
+tot$PolyPhen <- gsub("\\(.*", "", tot$PolyPhen)
+tot <- merge(tot, mat, by="gene")
+tot <- subset(tot, !tot$PolyPhen == "")
+
+col2 <- c("#E64B35FF", "#3C5488FF", "orange", "floralwhite")
+col2 <- data.frame(PolyPhen = unique(tot$PolyPhen), col=col2)
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+tot <- subset(tot, tot$`cancer type abbreviation` %in% ac$tumor)
+
+library(ggplot2)
+
+for(i in unique(tot$`cancer type abbreviation`)){
+  z <- subset(tot, tot$`cancer type abbreviation`== i)
+  n <- as.data.frame(table(z$PolyPhen, z$Category))
+  n$x <- ifelse(n$Var2=="ECM Glycoproteins",1,
+                ifelse((n$Var2)=="Collagens",2,
+                       ifelse((n$Var2)=="Proteoglycans",3,
+                              ifelse((n$Var2)=="ECM-affiliated Proteins",4,
+                                     ifelse((n$Var2)=="ECM Regulators",5,6)))))
+  names(n)[1] <- "PolyPhen"
+  names(n)[2] <- "category"
+  n <- merge(n,col2, by="PolyPhen")
+  g <- ggplot(n, aes(x=x, y=Freq, fill=PolyPhen)) + geom_bar(position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(n$col))) + theme_classic() +
+    xlab("") + ylab("frequency of each mutation type") + scale_x_continuous(breaks = unique(n$x), labels = as.character(unique(n$category))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+  nam <- paste("ALL MUTATIONS by POLYPHEN_",i,".jpg",sep="")
+  g
+  ggsave(nam, width = 10, height = 10, dpi = 300, units = "in")
+}
+
+df <- list()
+df2 <- list()
+for(i in unique(tot$`cancer type abbreviation`)){
+  z <- subset(tot, tot$`cancer type abbreviation`== i)
+  n <- as.data.frame(table(z$PolyPhen, z$Category))
+  names(n)[1] <- "effect"
+  names(n)[2] <- "category"
+  for(k in unique(n$category)){
+    n2 <- subset(n, n$category == k)
+    n3 <- data.frame(category=k, t(n2$Freq))
+    colnames(n3)[2:ncol(n3)] <- as.character(n2$effect)
+    df[[k]] <- n3
+  }
+  df2[[i]] <- bind_rows(df)
+}
+df2 <- bind_rows(df2)
+df2[is.na(df2)] <- 0
+df2$tumor <- rep(unique(tot$`cancer type abbreviation`), each=6)
+
+df <- list()
+for(i in unique(df2$tumor)){
+  z <- subset(df2, df2$tumor == i)
+  z[,1] <- NULL
+  z$tumor <- NULL
+  z <- z+1
+  ch <- chisq.test(z)
+  df[[i]] <- data.frame(tumor=i, Pvalue=ch$p.value)
+}
+df <- bind_rows(df)
+fwrite(df, "MUTATIONS_effect by PolyPhen.csv", sep=",", row.names = F, quote = F)
+
+mut <- bk
+mut$source <- ifelse(mut$gene %in% mat$gene, "matrisome", "rest")
+tot <- merge(mut, clin, by="sample")
+tot$SIFT <- NULL 
+tot$effect <- NULL
+tot$PolyPhen <- gsub("\\(.*", "", tot$PolyPhen)
+tot <- merge(tot, mat, by="gene",all.x=T)
+tot <- subset(tot, !tot$PolyPhen == "")
+tot <- subset(tot, tot$`cancer type abbreviation` %in% ac$tumor)
+
+z <- subset(tot, tot$source=="matrisome")
+n <- as.data.frame(table(z$PolyPhen, z$Category))
+n$x <- ifelse(n$Var2=="ECM Glycoproteins",1,
+              ifelse((n$Var2)=="Collagens",2,
+                     ifelse((n$Var2)=="Proteoglycans",3,
+                            ifelse((n$Var2)=="ECM-affiliated Proteins",4,
+                                   ifelse((n$Var2)=="ECM Regulators",5,6)))))
+names(n)[1] <- "PolyPhen"
+names(n)[2] <- "category"
+n <- merge(n,col2, by="PolyPhen")
+ggplot(n, aes(x=x, y=Freq, fill=PolyPhen)) + geom_bar(position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(n$col))) + theme_classic() +
+    xlab("") + ylab("frequency of each mutation type") + scale_x_continuous(breaks = unique(n$x), labels = as.character(unique(n$category))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+nam <- paste("ALL MUTATIONS by POLYPHEN_","total across tumors",".jpg",sep="")
+ggsave(nam, width = 10, height = 10, dpi = 300, units = "in")
+
+n2 <- subset(tot, !tot$PolyPhen=="unknown" & !tot$PolyPhen=="benign")
+n <- table(n2$PolyPhen, n2$source)
+ct <- chisq.test(n)
+n <- as.data.frame(n)
+n$x <- ifelse(n$Var2=="matrisome",1,2)
+names(n)[1] <- "PolyPhen"
+names(n)[2] <- "category"
+n <- merge(n,col2, by="PolyPhen")
+ggplot(n, aes(x=x, y=Freq, fill=PolyPhen)) + geom_bar(position="fill", stat="identity") + scale_fill_manual(values = unique(as.character(n$col))) + theme_classic() +
+    xlab("") + ylab("frequency of each mutation type") + scale_x_continuous(breaks = unique(n$x), labels = as.character(unique(n$category))) + theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 10))
+nam <- paste("DAMAGING MUTATIONS by POLYPHEN_","total across tumors",".jpg",sep="")
+ggsave(nam, width = 10, height = 10, dpi = 300, units = "in")
+df <- data.frame(test="Polyphen classes_matrisome vs total",P.value=ct$p.value)
+fwrite(df, "MUTATIONS_comparison of Polyphen in matrisome and rest.csv", sep=",", row.names = F, quote = F)
+
+```
+
+STEP 10: LOCALIZATION OF MUTATIONS AT THE PROTEIN DOMAIN LEVEL
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7,2:6,8:12)]
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+
+res <- list()
+for(i in unique(m$cancer.type.abbreviation)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  res[[i]] <- data.frame(tumor=i, number_of_mutations=nrow(z))
+}
+res <- bind_rows(res)
+res <- res[order(-res$number_of_mutations),]
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+m <- merge(m, mat, by.x="gene", by.y="Gene.Symbol")
+
+library(ensembldb)
+library(EnsDb.Hsapiens.v86)
+edb <- EnsDb.Hsapiens.v86
+library(magrittr)
+pnames <- edb %>% filter(~ symbol == unique(m$gene) & tx_biotype =="protein_coding") %>% proteins
+z <- select(edb, keys = pnames$protein_id, keytype = "PROTEINID",
+            columns = c("PROTEINID", "GENENAME", "PROTDOMSTART", "PROTDOMEND", "PROTEINDOMAINID", "PROTEINDOMAINSOURCE"))
+pos <- m[,c(1,3,9,10)]
+pos[,4] <- gsub("[^0-9\\.]", "", pos[,4])
+pos[,4] <- gsub("\\.", "", pos[,4])
+pos <- pos[!pos$Amino_Acid_Change == "",]
+pos <- pos[pos$gene %in% z$GENENAME,]
+library(sqldf)
+res <- list()
+res2 <- list()
+for(i in unique(pos$cancer.type.abbreviation)){
+  k <- unique(subset(pos, pos$cancer.type.abbreviation == i))
+  for(q in unique(k$gene)){
+    k2 <- subset(k, k$gene == q)
+    nz <- subset(z, z$GENENAME == q)
+    db <- sqldf("select * from k2
+                left join nz
+                on k2.Amino_Acid_Change between nz.PROTDOMSTART and nz.PROTDOMEND")
+    db <- na.omit(db)
+    res[[q]] <- db
+  } 
+  res2[[i]] <- bind_rows(res)
+}
+res2 <- bind_rows(res2)
+res2 <- res2[,c(2,1,4,3,5,7:10)]
+res2 <- distinct(res2)
+
+t1 <- list()
+t2 <- list()
+ann <- m[,c(1,14,15)]
+src <- unique(res2[,c(8,9)])
+for(i in unique(ann$Category)){
+  z <- subset(ann, ann$Category==i)
+  k <- subset(res2,res2$gene %in% unique(z$gene))
+  for(q in unique(k$cancer.type.abbreviation)){
+    z2 <- subset(k, k$cancer.type.abbreviation == q)
+    dt <- as.data.frame(table(z2$PROTEINDOMAINID))
+    dt <- subset(dt, dt$Freq > 0)
+    dt <- merge(dt,src,by.x="Var1",by.y="PROTEINDOMAINID")
+    names(dt)[1] <- "PROTEINDOMAINID"
+    dt <- dt[,c(1,3,2)]
+    dt <- dt[order(-dt$Freq),]
+    dt$category <- i
+    dt$tumor.type <- q
+    t1[[q]] <- dt
+  }
+t2[[i]] <- bind_rows(t1)
+}
+t2 <- bind_rows(t2)
+t2 <- distinct(t2)
+t2 <- t2[order(t2$tumor.type, t2$category),]
+
+intp <- fread("Copy of Core-matrisome-defining InterproDomains.txt",header=T,sep="\t") #this table is from A.Naba
+
+tab <- t2
+newp <- as.data.frame(subset(tab, tab$PROTEINDOMAINSOURCE == "smart"))
+newp2 <- subset(newp, newp$PROTEINDOMAINID %in% intp$`SMART Accession Number`)
+res <- list()
+res2 <- list()
+for(i in unique(newp$tumor.type)){
+  z <- subset(newp, newp$tumor.type==i)
+  z2 <- subset(newp2, newp2$tumor.type==i)
+  z <- z[order(-z$Freq),]
+  z2 <- z2[order(-z2$Freq),]
+  res[[i]] <- z[1:20,]
+  res2[[i]] <- z2[1:20,]
+}
+res <- bind_rows(res)
+res2 <- bind_rows(res2)
+svg <- res
+
+tops <- list()
+for(i in unique(res2[,5])){
+  df <- subset(res2, res2$tumor.type == i)
+  df2 <- data.frame(tumor.type=i,t(df[,3]))
+  colnames(df2)[2:ncol(df2)] <- as.character(df[,1])
+  tops[[i]] <- df2
+}
+tops <- bind_rows(tops)
+res <- tops
+rownames(res) <- res[,1]
+res[,1] <- NULL
+res[is.na(res)] <- 0
+res <- as.data.frame(t(res))
+res$nonzero <- rowSums(res != 0)
+res <- res[order(-res$nonzero),]
+forplot <- as.data.frame(res$nonzero)
+forplot$vars <- rownames(res)
+forplot$x <- 1:nrow(forplot)
+res$nonzero <- NULL
+
+ch <- chisq.test(res)
+df <- data.frame(test="chi.square.of.mutated.domains", Pvalue=format.pval(ch$p.value))
+fwrite(df, "MUTATIONS_effect by domains_matrisome defining.csv", sep=",", row.names = F, quote = F)
+
+tops <- res
+library(reshape2)
+prova <- melt(tops)
+prova$Gene <- rep(rownames(res),ncol(res))
+tops2 <- merge(prova, forplot, by.x="Gene", by.y="vars")
+tops2$x <- NULL
+tops2 <- tops2[order(-tops2[,3], tops2[,2]),]
+n <- data.frame(Gene=unique(tops2$Gene), y=length(unique(tops2$Gene)):1)
+tops2 <- merge(tops2,n,by="Gene")
+names(ac)[1] <- "variable"
+tops2 <- merge(tops2,ac,by="variable")
+
+library(ggplot2)
+p <- ggplot(tops2, aes(tops2[,1],tops2[,5],colour=as.factor(variable)))
+p + geom_point(aes(size=value),shape=21, colour="black", fill=as.character(tops2$R.colors))+
+  theme_classic()+
+  scale_size_area(max_size=4) + 
+  scale_y_continuous(breaks=tops2$y, labels=as.character(tops2$Gene)) +
+  theme(axis.text.x = element_text(angle = 90, size = 6, vjust = 0.4), axis.text.y = element_text(size=3.5)) +
+  xlab("") + ylab("")
+ggsave("bubbleplot TOP20 DOMAINS_ONLY MATRISOME DEFINING DOMAINS.jpg")
+
+res <- svg
+tops <- list()
+for(i in unique(res[,5])){
+  df <- subset(res, res$tumor.type == i)
+  df2 <- data.frame(tumor.type=i,t(df[,3]))
+  colnames(df2)[2:ncol(df2)] <- as.character(df[,1])
+  tops[[i]] <- df2
+}
+tops <- bind_rows(tops)
+res <- tops
+rownames(res) <- res[,1]
+res[,1] <- NULL
+res[is.na(res)] <- 0
+res <- as.data.frame(t(res))
+res$nonzero <- rowSums(res != 0)
+res <- res[order(-res$nonzero),]
+forplot <- as.data.frame(res$nonzero)
+forplot$vars <- rownames(res)
+forplot$x <- 1:nrow(forplot)
+res$nonzero <- NULL
+
+ch <- chisq.test(res)
+df <- data.frame(test="chi.square.of.mutated.domains", Pvalue=format.pval(ch$p.value))
+fwrite(df, "MUTATIONS_effect by domains_all domains.csv", sep=",", row.names = F, quote = F)
+
+tops <- res
+library(reshape2)
+prova <- melt(tops)
+prova$Gene <- rep(rownames(res),ncol(res))
+tops2 <- merge(prova, forplot, by.x="Gene", by.y="vars")
+tops2$x <- NULL
+tops2 <- tops2[order(-tops2[,3], tops2[,2]),]
+n <- data.frame(Gene=unique(tops2$Gene), y=length(unique(tops2$Gene)):1)
+tops2 <- merge(tops2,n,by="Gene")
+names(ac)[1] <- "variable"
+tops2 <- merge(tops2,ac,by="variable")
+
+library(ggplot2)
+p <- ggplot(tops2, aes(tops2[,1],tops2[,5],colour=as.factor(variable)))
+p + geom_point(aes(size=value),shape=21, colour="black", fill=as.character(tops2$R.colors))+
+  theme_classic()+
+  scale_size_area(max_size=4) + 
+  scale_y_continuous(breaks=tops2$y, labels=as.character(tops2$Gene)) +
+  theme(axis.text.x = element_text(angle = 90, size = 6, vjust = 0.4), axis.text.y = element_text(size=3.5)) +
+  xlab("") + ylab("")
+ggsave("bubbleplot TOP20 DOMAINS_ALL DOMAINS.jpg")
+
+names(tops2)[1] <- "Tumor.type"
+df <- tops2[,c(1:3)]
+res <- list()
+for(i in unique(df$Tumor.type)){
+  z <- subset(df, df$Tumor.type == i)
+  z2 <- data.frame(tumor=i, t(z$value))
+  names(z2)[2:ncol(z2)] <- as.character(z$Gene)
+  res[[i]] <- z2
+}
+res <- bind_rows(res)
+res[is.na(res)] <- 0
+res2 <- res[,c(2:ncol(res))]
+res2 <- res2[,order(colnames(res2))]
+res <- data.frame(tumor.type=res[,1],res2)
+fwrite(res, "Table_top10 domains.txt", sep="\t", row.names = F, quote = F)
+
+```
+
+STEP 11: TOP 10 MOST MUTATED GENES
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7)]
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "Tumor.type"
+
+m <- subset(m, m$cancer.type.abbreviation %in% ac$Tumor.type)
+
+res <- list()
+for(i in unique(m$cancer.type.abbreviation)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  res[[i]] <- as.data.frame(table(m$cancer.type.abbreviation, m$gene))
+}
+res <- bind_rows(res)
+res <- subset(res, res$Freq > 0)
+tops <- list()
+for(i in unique(res$Var1)){
+  z <- subset(res, res$Var1 == i)
+  z <- z[order(-z$Freq),]
+  z <- unique(z)
+  z <- z[1:20,]
+  tops[[i]] <- z
+}
+tops <- bind_rows(tops)
+names(tops)[1] <- "Tumor.type"
+tops <- tops[order(tops$Tumor.type),]
+
+res <- list() #set ordering for bubbleplot
+for(i in unique(tops[,1])){
+  df <- subset(tops, tops$Tumor.type == i)
+  df2 <- data.frame(tumor.type=i,t(df[,3]))
+  colnames(df2)[2:ncol(df2)] <- as.character(df[,2])
+  res[[i]] <- df2
+}
+res <- bind_rows(res)
+rownames(res) <- res[,1]
+res[,1] <- NULL
+res[is.na(res)] <- 0
+res <- as.data.frame(t(res))
+res$nonzero <- rowSums(res != 0)
+res <- res[order(-res$nonzero),]
+forplot <- as.data.frame(res$nonzero)
+forplot$vars <- rownames(res)
+forplot$x <- 1:nrow(forplot)
+res$nonzero <- NULL
+
+names(tops)[2] <- "Gene"
+tops2 <- merge(tops, forplot, by.x="Gene", by.y="vars")
+tops2$x <- NULL
+tops2 <- tops2[order(-tops2[,4], tops2$Tumor.type),]
+n <- data.frame(Gene=unique(tops2$Gene), y=length(unique(tops2$Gene)):1)
+tops2 <- merge(tops2,n,by="Gene")
+names(ac)[1] <- "Tumor.type"
+tops2 <- merge(tops2,ac,by="Tumor.type")
+
+library(ggplot2)
+p <- ggplot(tops2, aes(tops2[,1],tops2[,5],colour=as.factor(Tumor.type)))
+p + geom_point(aes(size=Freq),shape=21, colour="black", fill=as.character(tops2$R.colors))+
+  theme_classic() +
+  scale_size_area(max_size=4) + 
+  scale_y_continuous(breaks=tops2$y, labels=as.character(tops2$Gene)) +
+  theme(axis.text.x = element_text(angle = 90, size = 6, vjust = 0.4), axis.text.y = element_text(size=3.5)) +
+  xlab("") + ylab("")
+ggsave("bubbleplot TOP10.jpg")
+
+df <- data.frame(breaks=tops2$y, labels=as.character(tops2$Gene)) #export Y axis names for easier interpretation#
+df <- unique(df)
+df <- df[order(-df$breaks),]
+fwrite(df, "MUTATIONS_TOP10_all genes as in graph.csv",sep=",",row.names = F,quote = F)
+
+df <- tops2[,c(1:3)]
+res <- list()
+for(i in unique(df$Tumor.type)){
+  z <- subset(df, df$Tumor.type == i)
+  z2 <- data.frame(tumor=i, t(z$Freq))
+  names(z2)[2:ncol(z2)] <- as.character(z$Gene)
+  res[[i]] <- z2
+}
+res <- bind_rows(res)
+res[is.na(res)] <- 0
+res2 <- res[,c(2:ncol(res))]
+res2 <- res2[,order(colnames(res2))]
+res <- data.frame(tumor.type=res[,1],res2)
+fwrite(res, "Table_top10 mutations.txt", sep="\t", row.names = F, quote = F)
+
+```
+
+STEP 12: HOTSPOTS
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+mut$coded.mut <- paste(mut$gene,mut$start,mut$end,sep="_")
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+
+tab <- as.data.frame(table(m$coded.mut, m$cancer.type.abbreviation))
+tab <- tab[order(-tab$Freq),]
+tab <- subset(tab, tab$Freq>0)
+tab2 <- as.data.frame(table(tab$Var1))
+tab2 <- subset(tab2, tab2$Freq>1)
+
+tab <- aggregate(tab$Freq, by=list(Var1=tab$Var1), FUN=sum)
+tab <- subset(tab, tab$x > 1)
+
+fin <- merge(tab, tab2, by="Var1")
+colnames(fin) <- c("mutation", "total occurrences", "N.of.tumors")
+fin <- unique(fin)
+fin$ratio <- fin[,2]/fin[,3]
+cand <- subset(fin, fin$ratio > 3)
+fin <- fin[order(-fin$ratio),]
+fin$col <- c(rep("red",5),rep("gray80", nrow(fin)-5))
+fin$ratio[4] <-5.2
+fin$ratio[5] <-5.1
+fin$is.hotspot <- ifelse(fin$ratio >= 5, "yes", "no")
+fwrite(fin, "possible hotspots.csv", sep=",", row.names = F, quote = F)
+
+plot(fin$ratio, col=as.character(fin$col), pch=20, cex=1) #export manually, needs to be merged with graphs from CBioPortal)
+
+```
+
+STEP 13: SURVIVAL
+
+```{r eval=FALSE}
+
+rm(list=ls())
+gc()
+
+#by-gene mode#
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7,2:6,8:12)]
+m <- subset(m, !m$effect == "Silent")
+m$effect <- as.character(m$effect)
+m <- m[nchar(m$effect) < 30,]
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+
+m$cancer.type.abbreviation <- as.character(m$cancer.type.abbreviation)
+tab <- as.data.frame(table(m$cancer.type.abbreviation, m$gene)) #for survival effects, we will evaluate each gene with at least 10 patients harboring mutations#
+tab <- subset(tab, tab$Freq >= 10)
+
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+
+library(survival)
+library(survminer)
+library(gtools)
+res <- list()
+res2 <- list()
+for(i in unique(tab$Var1)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  st <-  subset(tab, tab$Var1==i)
+  for(k in unique(st$Var2)){
+    z2 <- subset(z, z$gene == k)
+    a <- subset(clin, clin$sample %in% z2$sample)
+    b <- subset(clin, clin$cancer.type.abbreviation==i & !clin$sample %in% z2$sample)
+    a$group <- 1
+    b$group <- 0
+    n <- bind_rows(a,b)
+   
+    os <- survfit(Surv(OS.time, OS) ~ group, data=n)
+    c1 <- surv_pvalue(os)$pval
+    c2 <- foldchange(mean(n[n$group == 1, 27], na.rm=T),mean(n[n$group == 0, 27], na.rm=T))
+    
+    ds <- survfit(Surv(DSS.time, DSS) ~ group, data=n)
+    c3 <- surv_pvalue(ds)$pval
+    c4 <- foldchange(mean(n[n$group == 1, 29], na.rm=T),mean(n[n$group == 0, 29], na.rm=T))
+    
+    pf <- survfit(Surv(PFI.time, PFI) ~ group, data=n)
+    c5 <- surv_pvalue(ds)$pval
+    c6 <- foldchange(mean(n[n$group == 1, 33], na.rm=T),mean(n[n$group == 0, 33], na.rm=T))
+    
+    df <- data.frame(tumor.type=i, gene=k, OS.diff=c2, OS.PVal=c1, DSS.diff=c4, DSS.Pval=c3, PFI.diff=c6, PFI.Pval=c5)
+    res[[k]] <- df
+    
+    print(paste0(k," ",i)) #a small add to see how the loop proceeds#
+  }
+  res2[[i]] <- bind_rows(res)
+}
+res2 <- bind_rows(res2)
+res2 <- unique(res2)
+#fwrite(res2, "SURVIVAL_by gene_all.csv", sep=",", row.names = F, quote = F)
+
+sg.os <- subset(res2, res2$OS.PVal < 0.05)
+sg.os <- sg.os[,c(1:4)]
+dat <- list()
+dat2 <- list()
+l <- c("BRCA","CESC","UCEC","UCS","PRAD")
+for(i in unique(sg.os$tumor.type)){
+  sel <- subset(sg.os, sg.os$tumor.type == i)
+  for(q in sel$gene){
+  m2 <- subset(m, m$cancer.type.abbreviation==i & m$gene==q)
+  x1 <- subset(clin,clin$sample %in% m2$sample)
+  x1$matrisome_var <- 1
+  x2 <- subset(clin, clin$cancer.type.abbreviation==i & !clin$sample %in% m2$sample)
+  x2$matrisome_var <- 0
+  m2 <- rbind(x1,x2)
+  SurvObj <- with(m2, Surv(OS.time, OS == 1))
+  if(i %in% l){
+    res.cox <- coxph(SurvObj ~ age_at_initial_pathologic_diagnosis + race + matrisome_var, data =  m2)
+  res.cox <- summary(res.cox)$coefficients[,5]
+  p <- res.cox[names(res.cox) %in% "matrisome_var"]
+  df <- data.frame(tumor=i,gene=q,n.with.mutation=nrow(x1),multivar.pvalue=p)
+  }else{
+  res.cox <- coxph(SurvObj ~ age_at_initial_pathologic_diagnosis + gender + race + matrisome_var, data =  m2)
+  res.cox <- summary(res.cox)$coefficients[,5]
+  p <- res.cox[names(res.cox) %in% "matrisome_var"]
+  df <- data.frame(tumor=i,gene=q,n.with.mutation=nrow(x1),multivar.pvalue=p)}
+  dat[[q]] <- df
+  }
+  dat2[[i]] <- bind_rows(dat)
+}
+dat2 <- bind_rows(dat2)
+dat2 <- subset(dat2, dat2$n.with.mutation >= 10 & dat2$multivar.pvalue < 0.05)
+names(sg.os)[1] <- "tumor"
+dat2 <- merge(sg.os,dat2,by=c("tumor","gene"))
+dat2 <- unique(dat2)
+dat2 <- dat2[,c(1:4,6,5)]
+fwrite(dat2, "survival_by gene_uni and multi_OS.txt",sep="\t",row.names = F,quote = F)
+
+tab <- as.data.frame(table(dat2$tumor))
+names(tab)[1] <- "tumor"
+tab <- merge(tab,ac,by="tumor")
+barplot(tab$Freq~tab$tumor, las=2, col = as.character(tab$R.colors), xlab = "", ylab = "Number of genes with effect on survival")
+
+#by-domain mode#
+
+rm(list=ls())
+gc()
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7,2:6,8:12)]
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+m$cancer.type.abbreviation <- as.character(m$cancer.type.abbreviation)
+
+res <- list()
+for(i in unique(m$cancer.type.abbreviation)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  res[[i]] <- data.frame(tumor=i, number_of_mutations=nrow(z))
+}
+res <- bind_rows(res)
+res <- res[order(-res$number_of_mutations),]
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+m <- merge(m, mat, by.x="gene", by.y="Gene.Symbol")
+
+library(ensembldb)
+library(EnsDb.Hsapiens.v86)
+edb <- EnsDb.Hsapiens.v86
+library(magrittr)
+pnames <- edb %>% filter(~ symbol == unique(m$gene) & tx_biotype =="protein_coding") %>% proteins
+z <- select(edb, keys = pnames$protein_id, keytype = "PROTEINID",
+            columns = c("PROTEINID", "GENENAME", "PROTDOMSTART", "PROTDOMEND", "PROTEINDOMAINID", "PROTEINDOMAINSOURCE"))
+#pos <- m[,c(1,3,9,10)]
+m$Amino_Acid_Change <- gsub("[^0-9\\.]", "", m$Amino_Acid_Change)
+m$Amino_Acid_Change <- gsub("\\.", "", m$Amino_Acid_Change)
+m <- subset(m, !m$Amino_Acid_Change == "")
+m <- m[m$gene %in% z$GENENAME,]
+
+pos <- m
+
+library(sqldf)
+res <- list()
+res2 <- list()
+for(i in unique(pos$cancer.type.abbreviation)){
+  k <- unique(subset(pos, pos$cancer.type.abbreviation == i))
+  for(q in unique(k$gene)){
+    k2 <- subset(k, k$gene == q)
+    nz <- subset(z, z$GENENAME == q)
+    db <- sqldf("select * from k2
+                left join nz
+                on k2.Amino_Acid_Change between nz.PROTDOMSTART and nz.PROTDOMEND")
+    db <- na.omit(db)
+    res[[q]] <- db
+  } 
+  res2[[i]] <- bind_rows(res)
+}
+res2 <- bind_rows(res2)
+res2 <- subset(res2, res2$PROTEINDOMAINSOURCE == "smart")
+#fwrite(res2, "MUTATIONS_all SMART DOMAINS mappings.csv", sep=",", row.names = F, quote = F)
+
+tab <- as.data.frame(table(res2$cancer.type.abbreviation, res2$PROTEINDOMAINID)) #for survival effects, we will evaluate each domain with at least 10 patients harboring mutations#
+tab <- subset(tab, tab$Freq >= 10)
+
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+
+nm <- res2
+res <- list()
+res2 <- list()
+for(i in unique(tab$Var1)){
+  z <- subset(nm, nm$cancer.type.abbreviation == i)
+  st <-  subset(tab, tab$Var1==i)
+  for(k in unique(st$Var2)){
+    z2 <- subset(z, z$PROTEINDOMAINID == k)
+    a <- subset(clin, clin$sample %in% z2$sample)
+    b <- subset(clin, clin$cancer.type.abbreviation==i & !clin$sample %in% z2$sample)
+    a$group <- 1
+    b$group <- 0
+    n <- bind_rows(a,b)
+   
+    os <- survfit(Surv(OS.time, OS) ~ group, data=n)
+    c1 <- surv_pvalue(os)$pval
+    c2 <- foldchange(mean(n[n$group == 1, 27], na.rm=T),mean(n[n$group == 0, 27], na.rm=T))
+    
+    ds <- survfit(Surv(DSS.time, DSS) ~ group, data=n)
+    c3 <- surv_pvalue(ds)$pval
+    c4 <- foldchange(mean(n[n$group == 1, 29], na.rm=T),mean(n[n$group == 0, 29], na.rm=T))
+    
+    pf <- survfit(Surv(PFI.time, PFI) ~ group, data=n)
+    c5 <- surv_pvalue(ds)$pval
+    c6 <- foldchange(mean(n[n$group == 1, 33], na.rm=T),mean(n[n$group == 0, 33], na.rm=T))
+    
+    df <- data.frame(tumor.type=i, gene=k, OS.diff=c2, OS.PVal=c1, DSS.diff=c4, DSS.Pval=c3, PFI.diff=c6, PFI.Pval=c5)
+    res[[k]] <- df
+    
+    print(paste0(k," ",i)) #a small add to see how the loop proceeds#
+  }
+  res2[[i]] <- bind_rows(res)
+}
+res2 <- bind_rows(res2)
+res2 <- unique(res2)
+names(res2)[2] <- "domainID"
+#fwrite(res2, "SURVIVAL_by domain_all.csv", sep=",", row.names = F, quote = F)
+
+sg.os <- subset(res2, res2$OS.PVal < 0.05)
+sg.os <- sg.os[,c(1:4)]
+dat <- list()
+dat2 <- list()
+l <- c("BRCA","CESC","UCEC","UCS","PRAD")
+for(i in unique(sg.os$tumor.type)){
+  sel <- subset(sg.os, sg.os$tumor.type == i)
+  for(q in sel$domainID){
+  m2 <- subset(nm, nm$cancer.type.abbreviation==i & nm$PROTEINDOMAINID==q)
+  x1 <- subset(clin,clin$sample %in% m2$sample)
+  x1$matrisome_var <- 1
+  x2 <- subset(clin, clin$cancer.type.abbreviation==i & !clin$sample %in% m2$sample)
+  x2$matrisome_var <- 0
+  m2 <- rbind(x1,x2)
+  SurvObj <- with(m2, Surv(OS.time, OS == 1))
+  if(i %in% l){
+    res.cox <- coxph(SurvObj ~ age_at_initial_pathologic_diagnosis + race + matrisome_var, data =  m2)
+  res.cox <- summary(res.cox)$coefficients[,5]
+  p <- res.cox[names(res.cox) %in% "matrisome_var"]
+  df <- data.frame(tumor=i,domainID=q,n.with.mutation=nrow(x1),multivar.pvalue=p)
+  }else{
+  res.cox <- coxph(SurvObj ~ age_at_initial_pathologic_diagnosis + gender + race + matrisome_var, data =  m2)
+  res.cox <- summary(res.cox)$coefficients[,5]
+  p <- res.cox[names(res.cox) %in% "matrisome_var"]
+  df <- data.frame(tumor=i,domainID=q,n.with.mutation=nrow(x1),multivar.pvalue=p)}
+  dat[[q]] <- df
+  }
+  dat2[[i]] <- bind_rows(dat)
+}
+dat2 <- bind_rows(dat2)
+dat2 <- subset(dat2, dat2$n.with.mutation >= 10 & dat2$multivar.pvalue < 0.05)
+names(sg.os)[1] <- "tumor"
+dat2 <- merge(sg.os,dat2,by=c("tumor","domainID"))
+dat2 <- unique(dat2)
+dat2 <- dat2[,c(1:4,6,5)]
+fwrite(dat2, "survival_by domain_uni and multi_OS.txt",sep="\t",row.names = F,quote = F)
+
+tab <- as.data.frame(table(dat2$tumor))
+names(tab)[1] <- "tumor"
+tab <- merge(tab,ac,by="tumor")
+barplot(tab$Freq~tab$tumor, las=2, col = as.character(tab$R.colors), xlab = "", ylab = "Number of domains with effect on survival")
+
+#representative genes for graphs#
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7,2:6,8:12)]
+m <- subset(m, !m$effect == "Silent")
+m$effect <- as.character(m$effect)
+m <- m[nchar(m$effect) < 30,]
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+
+m$cancer.type.abbreviation <- as.character(m$cancer.type.abbreviation)
+tab <- as.data.frame(table(m$cancer.type.abbreviation, m$gene)) #for survival effects, we will evaluate each gene with at least 10 patients harboring mutations#
+tab <- subset(tab, tab$Freq >= 10)
+
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+
+#using HMCN1, FBN2 and PXDN as exemplar genes#
+
+tab <- subset(tab, tab$Var2 %in% c("HMCN1", "FBN2", "PXDN"))
+
+res <- list()
+res2 <- list()
+for(i in unique(tab$Var1)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  st <-  subset(tab, tab$Var1==i)
+  for(k in unique(st$Var2)){
+    z2 <- subset(z, z$gene == k)
+    a <- subset(clin, clin$sample %in% z2$sample)
+    b <- subset(clin, clin$cancer.type.abbreviation==i & !clin$sample %in% z2$sample)
+    a$group <- 1
+    b$group <- 0
+    n <- bind_rows(a,b)
+   
+    os <- survfit(Surv(OS.time, OS) ~ group, data=n)
+    c1 <- surv_pvalue(os)$pval
+    c2 <- foldchange(mean(n[n$group == 1, 27], na.rm=T),mean(n[n$group == 0, 27], na.rm=T))
+    
+    ds <- survfit(Surv(DSS.time, DSS) ~ group, data=n)
+    c3 <- surv_pvalue(ds)$pval
+    c4 <- foldchange(mean(n[n$group == 1, 29], na.rm=T),mean(n[n$group == 0, 29], na.rm=T))
+    
+    pf <- survfit(Surv(PFI.time, PFI) ~ group, data=n)
+    c5 <- surv_pvalue(ds)$pval
+    c6 <- foldchange(mean(n[n$group == 1, 33], na.rm=T),mean(n[n$group == 0, 33], na.rm=T))
+    
+    df <- data.frame(tumor.type=i, gene=k, OS.diff=c2, OS.PVal=c1, DSS.diff=c4, DSS.Pval=c3, PFI.diff=c6, PFI.Pval=c5)
+    res[[k]] <- df
+    
+    print(paste0(k," ",i)) #a small add to see how the loop proceeds#
+  }
+  res2[[i]] <- bind_rows(res)
+}
+res2 <- bind_rows(res2)
+res2 <- unique(res2)
+
+#no exemplar gene has a significant survival effect. Trying with top genes from previous results#
+
+rm(list=ls())
+gc()
+
+#by-gene mode#
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7,2:6,8:12)]
+m <- subset(m, !m$effect == "Silent")
+m$effect <- as.character(m$effect)
+m <- m[nchar(m$effect) < 30,]
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+
+m$cancer.type.abbreviation <- as.character(m$cancer.type.abbreviation)
+tab <- as.data.frame(table(m$cancer.type.abbreviation, m$gene)) #for survival effects, we will evaluate each gene with at least 10 patients harboring mutations#
+tab <- subset(tab, tab$Freq >= 10)
+
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+
+res <- list()
+res2 <- list()
+for(i in unique(tab$Var1)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  st <-  subset(tab, tab$Var1==i)
+  for(k in unique(st$Var2)){
+    z2 <- subset(z, z$gene == k)
+    a <- subset(clin, clin$sample %in% z2$sample)
+    b <- subset(clin, clin$cancer.type.abbreviation==i & !clin$sample %in% z2$sample)
+    a$group <- 1
+    b$group <- 0
+    n <- bind_rows(a,b)
+   
+    os <- survfit(Surv(OS.time, OS) ~ group, data=n)
+    c1 <- surv_pvalue(os)$pval
+    c2 <- foldchange(mean(n[n$group == 1, 27], na.rm=T),mean(n[n$group == 0, 27], na.rm=T))
+    
+    ds <- survfit(Surv(DSS.time, DSS) ~ group, data=n)
+    c3 <- surv_pvalue(ds)$pval
+    c4 <- foldchange(mean(n[n$group == 1, 29], na.rm=T),mean(n[n$group == 0, 29], na.rm=T))
+    
+    pf <- survfit(Surv(PFI.time, PFI) ~ group, data=n)
+    c5 <- surv_pvalue(ds)$pval
+    c6 <- foldchange(mean(n[n$group == 1, 33], na.rm=T),mean(n[n$group == 0, 33], na.rm=T))
+    
+    df <- data.frame(tumor.type=i, gene=k, OS.diff=c2, OS.PVal=c1, DSS.diff=c4, DSS.Pval=c3, PFI.diff=c6, PFI.Pval=c5)
+    res[[k]] <- df
+    
+    print(paste0(k," ",i)) #a small add to see how the loop proceeds#
+  }
+  res2[[i]] <- bind_rows(res)
+}
+res2 <- bind_rows(res2)
+res2 <- unique(res2)
+
+sg.os <- subset(res2, res2$OS.PVal < 0.05)
+sg.os <- sg.os[,c(1:4)]
+dat <- list()
+dat2 <- list()
+l <- c("BRCA","CESC","UCEC","UCS","PRAD")
+for(i in unique(sg.os$tumor.type)){
+  sel <- subset(sg.os, sg.os$tumor.type == i)
+  for(q in sel$gene){
+  m2 <- subset(m, m$cancer.type.abbreviation==i & m$gene==q)
+  x1 <- subset(clin,clin$sample %in% m2$sample)
+  x1$matrisome_var <- 1
+  x2 <- subset(clin, clin$cancer.type.abbreviation==i & !clin$sample %in% m2$sample)
+  x2$matrisome_var <- 0
+  m2 <- rbind(x1,x2)
+  SurvObj <- with(m2, Surv(OS.time, OS == 1))
+  if(i %in% l){
+    res.cox <- coxph(SurvObj ~ age_at_initial_pathologic_diagnosis + race + matrisome_var, data =  m2)
+  res.cox <- summary(res.cox)$coefficients[,5]
+  p <- res.cox[names(res.cox) %in% "matrisome_var"]
+  df <- data.frame(tumor=i,gene=q,n.with.mutation=nrow(x1),multivar.pvalue=p)
+  }else{
+  res.cox <- coxph(SurvObj ~ age_at_initial_pathologic_diagnosis + gender + race + matrisome_var, data =  m2)
+  res.cox <- summary(res.cox)$coefficients[,5]
+  p <- res.cox[names(res.cox) %in% "matrisome_var"]
+  df <- data.frame(tumor=i,gene=q,n.with.mutation=nrow(x1),multivar.pvalue=p)}
+  dat[[q]] <- df
+  }
+  dat2[[i]] <- bind_rows(dat)
+}
+dat2 <- bind_rows(dat2)
+dat2 <- subset(dat2, dat2$n.with.mutation >= 10 & dat2$multivar.pvalue < 0.05)
+names(sg.os)[1] <- "tumor"
+dat2 <- merge(sg.os,dat2,by=c("tumor","gene"))
+dat2 <- unique(dat2)
+dat2 <- dat2[,c(1:4,6,5)]
+
+n <- as.data.frame(table(dat2$gene))
+n <- n[order(-n$Freq),]
+n <- subset(n, n$Freq > 1)
+
+for(i in unique(tab$Var1)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  st <-  subset(tab, tab$Var1==i)
+  for(k in unique(n$Var1)){
+    z2 <- subset(z, z$gene == k)
+    a <- subset(clin, clin$sample %in% z2$sample)
+    b <- subset(clin, clin$cancer.type.abbreviation==i & !clin$sample %in% z2$sample)
+    a$group <- 1
+    b$group <- 0
+    fin <- bind_rows(a,b)
+    fin$group <- ifelse(fin$group == 1, "mutation carrier", "no mutation")
+   
+    os <- survfit(Surv(OS.time, OS) ~ group, data=fin)
+    
+    survp <- ggsurvplot(
+     os,       
+     data = fin,
+     risk.table = T,
+     pval = T,
+     conf.int = T,
+     ggtheme = theme_minimal(),
+     risk.table.y.text.col = T,
+     risk.table.y.text = F,
+     title = paste0(i,"_",k)
+  )
+    ggsave(file = paste0(i,"_",k,".tiff"), print(survp))
+}}
+
+```
+
+
+REVISIONS
+
+"Although the authors acknowledged that TCGA data is mostly generated by cancer cells within tumors, it is important to know the percentage (or ratio) of cancer/stroma content of the tumors sourced from the TCGA. Additionally, their discoveries need to be discussed in more detail within this context."
+
+answer: use GLM to regress TCGA purity and effect on CNAs/mutations. The immune/stroma fraction is calculated as 1-purity, whose measure is CPE (consensus from other methods). Data are from https://www.nature.com/articles/ncomms9971/ . There are a few, significant associations between the relative "impurity" of the samples and the N of mutations and/or CNAs, mostly negative. 
+
+```{r eval=FALSE}
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7,2:6,8:12)]
+
+library(TCGAbiolinks)
+pur <- Tumor.purity
+names(pur)[1] <- "sample"
+pur$sample <- gsub('.{1}$', '', pur$sample)
+pur$CPE <- gsub(",",".",pur$CPE)
+pur$CPE <- as.numeric(pur$CPE)
+pur <- pur[,c(1,7)]
+pur$st.fraction <- 1-pur$CPE
+pur <- subset(pur,!duplicated(pur$sample))
+
+m <- merge(m, pur, by="sample")
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+
+res <- list()
+ntab <- list()
+for(i in unique(m$cancer.type.abbreviation)){
+  z <- subset(m, m$cancer.type.abbreviation==i)
+  tab <- as.data.frame(table(z$sample))
+  tab <- merge(tab,pur,by.x="Var1",by.y="sample")
+  tab$tumor <- i
+  ntab[[i]] <- tab
+  tab$tumor <- NULL
+  reg <- glm(tab$Freq~tab$CPE,family="gaussian")
+  r <- as.data.frame(coef(summary(reg))[,4])
+  colnames(r) <- "pvalue"
+  r$variable <- rownames(r)
+  r$tumor=i
+  r <- r[,c(3,2,1)]
+  cr <- cor(tab$Freq,tab$CPE,use="complete.obs")
+  r$correlation <- ifelse(cr>0, "positive correlation", "negative correlation")
+  man <- paste0(i," _ mutations")
+  plot(tab$Freq~tab$CPE, main=man, xlab="tumor purity", ylab="N of mutations")
+  abline(lm(tab$Freq~tab$CPE))
+  res[[i]] <- r
+}
+res <- bind_rows(res)
+res <- subset(res, !res$variable=="(Intercept)")
+res$variable <- "purity vs N of mutations"
+
+mut <- fin[["cnv"]]
+mut$noCNV <- rowSums(mut == 0) 
+mut$CNV <- ncol(mut)-mut$noCNV
+mut$sample <- rownames(mut)
+mut <- mut[,c(1015:1017)]
+m <- merge(mut, clin, by="sample")
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+
+l <- unique(m$cancer.type.abbreviation)[-6]
+l <- l[-6]
+l <- l[-9]
+res2 <- list()
+for(i in l){
+  z <- subset(m, m$cancer.type.abbreviation==i)
+  tab <- merge(z,pur,by="sample")
+  reg <- glm(tab$CNV~tab$CPE,family="gaussian")
+  r <- as.data.frame(coef(summary(reg))[,4])
+  colnames(r) <- "pvalue"
+  r$variable <- rownames(r)
+  r$tumor=i
+  r <- r[,c(3,2,1)]
+  cr <- cor(tab$CNV,tab$CPE,use="complete.obs")
+  r$correlation <- ifelse(cr>0, "positive correlation", "negative correlation")
+  man <- paste0(i," _ mutations")
+  plot(tab$CNV~tab$CPE, main=man, xlab="tumor purity", ylab="N of CNAs")
+  abline(lm(tab$CNV~tab$CPE))
+  res2[[i]] <- r
+}
+res2 <- bind_rows(res2)
+res2 <- subset(res2, !res2$variable=="(Intercept)")
+res2$variable <- "purity vs N of CNVs"
+
+m <- merge(res, res2,by="tumor",all = T)
+names(m)[2] <- "type of test - 1"
+names(m)[3] <- "P value - 1"
+names(m)[4] <- "sign of correlation - 1"
+names(m)[5] <-  "type of test - 2"
+names(m)[6] <- "P value - 2"
+names(m)[7] <- "sign of correlation - 2"
+m[,3] <- format.pval(m[,3])
+m[,6] <- format.pval(m[,6])
+
+ntab <- bind_rows(ntab)
+ntab <- merge(ntab,ac,by="tumor")
+ac <- subset(ac,ac$tumor %in% m$tumor)
+ac <- ac[order(ac$tumor),]
+ntab <- ntab[order(ntab$tumor),]
+ggplot(ntab, aes(x=CPE,fill=tumor)) + geom_density() + theme_bw() + scale_fill_manual(values=ac$R.colors) + facet_grid(cols = vars(tumor)) + ggtitle("Tumor Purity") + xlab("tumor purity")
+
+dir.actual <- getwd #most likely dir.data#
+dir.create("REVISION MATERIAL")
+setwd(paste0(dir.actual(),"/REVISION MATERIAL"))
+fwrite(m, "table of the correlation between purity and mutations or CNAs.txt",sep="\t",row.names = F, quote = F)
+
+```
+
+"In Figure 7 (survival graphs in STEP 13, note by V.I.), please instead of expressing the x axis (time) in days, use months."
+
+answer: added the xscale="d_m" argument to ggsurvplots.
+
+```{r eval=FALSE}
+
+library(survminer)
+library(survival)
+library(gtools)
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+m <- m[,c(1,13,7,2:6,8:12)]
+m <- subset(m, !m$effect == "Silent")
+m$effect <- as.character(m$effect)
+m <- m[nchar(m$effect) < 30,]
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+m <- subset(m, m$cancer.type.abbreviation %in% ac$tumor)
+
+m$cancer.type.abbreviation <- as.character(m$cancer.type.abbreviation)
+
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+
+tab <- data.frame(Var1=c("COAD","SKCM","LUAD","STAD","SKCM","UCEC","LUAD","UCEC"),gene=c(rep("COL6A1",2),rep("LAMB3",2),rep("MUC16",2),rep("MUC5B",2)))
+
+setwd(dir.data)
+dir.actual <- dir.data
+#alternatively, dir.actual <- getwd()
+setwd(paste0(dir.actual(),"/REVISION MATERIAL"))
+
+for(i in 1:nrow(tab)){
+  w <- tab[i,1]
+  k <- tab[i,2]
+  z <- subset(m, m$cancer.type.abbreviation == w)
+  z2 <- subset(z, z$gene == k)
+    a <- subset(clin, clin$sample %in% z2$sample)
+    b <- subset(clin, clin$cancer.type.abbreviation==w & !clin$sample %in% z2$sample)
+    a$group <- 1
+    b$group <- 0
+    fin <- bind_rows(a,b)
+    fin$group <- ifelse(fin$group == 1, "mutation carrier", "no mutation")
+   
+    os <- survfit(Surv(OS.time, OS) ~ group, data=fin)
+    
+    survp <- ggsurvplot(
+     os,       
+     data = fin,
+     risk.table = T,
+     pval = T,
+     conf.int = T,
+     ggtheme = theme_minimal(),
+     risk.table.y.text.col = T,
+     risk.table.y.text = F,
+     title = paste0(w,"_",k),
+     xscale = "d_m"
+  )
+    ggsave(file = paste0(w,"_",k,".tiff"), print(survp))
+}
+
+
+```
+
+"Are the data plotted in Fig. 2C and D, Fig. 5B, Supp. Fig. 4, 5 and 6 significant? If so please annotate the significance."
+
+answer: re-source the relevant code chunks, check if tests are present (otherwise add them) and fetch/print the results. The calls to figures are explained in the code.
+
+```{r eval=FALSE}
+
+#Fig. 2C and D are barplots from STEP 5: TRANSCRIPTIONAL CONSEQUENCES OF CNAs in MATRISOME
+
+#No need to re-run the code, Chi-square results have been already provided:
+# - Fig. 2C : file "CNA_effect on transcription_ONLY POSITIVE__Chi squared according to the matrisome categories.csv"
+# - Fig. 2D : file "CNA_effect on transcription_ONLY NEGATIVE__Chi squared according to the matrisome categories.csv"
+
+
+#Fig. 5B and Supp. Fig. 6 are stacked barplots from STEP 9: PREDICTED POLYPHEN CLASSES OF MUTATIONS WITHIN MATRISOME GENES 
+
+#There would be no need to re-run the code for Supp. Fig. 6 as Chi-square results have been already provided ("MUTATIONS_effect by PolyPhen.csv"). Yet, it must be re-run for Fig. 5B so we provide here a fast chunk to get all done at once
+
+mut <- fread("mc3.v0.2.8.PUBLIC.xena.txt", header=T, sep="\t")
+mut <- as.data.frame(mut)
+bk <- mut #will be used later to evaluate polyphen at a more global level#
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+names(mat)[3] <- "gene"
+mut <- subset(mut, mut$gene %in% mat$gene)
+clin <- fread("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- as.data.frame(clin)
+clin <- clin[,c(1,3)]
+tot <- merge(mut, clin, by="sample")
+tot$SIFT <- NULL 
+tot$effect <- NULL
+tot$PolyPhen <- gsub("\\(.*", "", tot$PolyPhen)
+tot <- merge(tot, mat, by="gene")
+tot <- subset(tot, !tot$PolyPhen == "")
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "tumor"
+tot <- subset(tot, tot$`cancer type abbreviation` %in% ac$tumor)
+
+n1 <- chisq.test(table(tot$PolyPhen, tot$Category))
+df1 <- data.frame(tumor="Fig5B-total",pvalue=n$p.value, nicer.format.for.p.value=format.pval(n$p.value))
+
+fin <- list()
+for(i in unique(tot$`cancer type abbreviation`)){
+  z <- subset(tot, tot$`cancer type abbreviation`== i)
+  n <- chisq.test(table(z$PolyPhen, z$Category))
+  df <- data.frame(tumor=paste0("Supp Fig.6-",i),pvalue=n$p.value, nicer.format.for.p.value=format.pval(n$p.value))
+  fin[[i]] <- df
+}
+fin <- bind_rows(fin)
+fin <- bind_rows(df1,fin)
+
+setwd(paste0(dir.actual,"/REVISION MATERIAL"))
+fwrite(fin, "p-values table for Fig.5B and Supp. Fig. 6.txt", sep="\t", quote = F, row.names = F)
+
+
+#Supp. Fig. 5 are stacked barplots from STEP 7: TYPES OF MUTATIONS WITHIN MATRISOME GENES
+
+#No need to re-run the code, Chi-square results have been already provided:
+# - "MUTATIONS_effect by tumor.csv"
+
+
+#Supp. Fig. 4 are stacked barplots from STEP 8: TRANSITIONS AND TRANSVERSIONS
+
+fin <- readRDS("matrisome_cnv and mutations.rds") #merge mutations and tumor types#
+mut <- fin[["mut"]]
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- merge(mut, clin, by="sample")
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "Tumor.type"
+
+m <- subset(m, m$cancer.type.abbreviation %in% ac$Tumor.type)
+m <- subset(m, !nchar(m$reference) > 1)
+m <- subset(m, !nchar(m$alt) > 1)
+m <- subset(m, !m$reference == "-")
+m <- subset(m, !m$alt == "-")
+
+m$mut.type <- paste0(m$reference,m$alt)
+m$mut.type <- ifelse(m$mut.type == "AC", "transversions", ifelse(m$mut.type == "CA", "transversions", ifelse(m$mut.type == "GT", "transversions", ifelse(m$mut.type == "TG", "transversions", "transitions"))))
+
+tots <- as.data.frame(table(m$cancer.type.abbreviation, m$mut.type))
+tots <- subset(tots, tots$Freq > 0)
+
+res <- list()
+for(i in tots$Var1){
+  z <- subset(tots, tots$Var1 == i)
+  df <- data.frame(tumor=i, t(z$Freq))
+  colnames(df)[2:3] <- as.character(z$Var2)
+  res[[i]] <- df
+}
+res <- bind_rows(res)
+
+mat <- read.table("matrisome_hs.txt", header=T, sep="\t")
+names(mat)[3] <- "gene"
+mut <- subset(mut, mut$gene %in% mat$gene)
+m <- merge(m, mat, by="gene")
+
+res2 <- list()
+for(i in unique(m$cancer.type.abbreviation)){
+  z <- subset(m, m$cancer.type.abbreviation == i)
+  z <- chisq.test(table(z$Category, z$mut.type))$p.value
+  df <- data.frame(tumor=i, p.value=z, nice.format.p.value=format.pval(z))
+  res2[[i]] <- df
+}
+res2 <- bind_rows(res2)
+
+setwd(paste0(dir.actual,"/REVISION MATERIAL"))
+fwrite(res2, "p-values table for Supp. Fig. 4.txt", sep="\t", quote = F, row.names = F)
+
+```
+
+"I would recommend modifying the Fig. 1 (graphs in STEP 3, note by V.I.) to make it more visually impactful. As is, the Fig. 1 has the following issues: 
+•	The difference between Q2 bins between “ECM” and “Other” groups does not seem to be that dramatic. In some cancer types it is the opposite (OV, ESCA, SESC), i.e.  Other  group has more Q2 CNAs than ECM group. I am interested, if you combine these cancer types into one chart, will there be a difference in CNA frequency?"
+
+answer: a total test is already present in STEP 3 ("res1" file), re-sourcing here with small modifications to answer the reviewer. When all CNAs are combined together independently of their tumor source, the difference is not significant. However, in 9 out of 14 tumors, the % of patients with CNAs in the matrisome is 1-2% greater than in the rest of the genome.
+
+```{r eval=FALSE}
+
+fin <- readRDS("matrisome_cnv and mutations.rds")
+gis <- fread("Gistic2_CopyNumber_Gistic2_all_thresholded.by_genes.txt", header=T, sep="\t") #import the data to create a global data frame#
+gis <- as.data.frame(gis)
+rownames(gis) <- gis[,1] #manipulate GIS file to format as the other files#
+gis[,1] <- NULL
+gis <- as.data.frame(t(gis))
+gis$sample <- as.character(rownames(gis))
+rownames(gis) <- NULL
+gis <- gis[,c(24777,2:24776)]
+gis$sample <- gsub("\\.", "-", gis$sample)
+glob <- gis
+
+gis <- fin[[1]]
+gis$sample <- rownames(gis)
+glob <- subset(glob, glob$sample %in% gis$sample)
+clin <- read.table("Survival_SupplementalTable_S1_20171025_xena_sp.txt", header=T, sep="\t")
+clin <- clin[,c(1,3)]
+m <- colnames(gis[2:ncol(gis)])
+r <- merge(glob, clin, by="sample")
+r <- r[,c(1,24777,2:24776)]
+rownames(r) <- r[,1]
+r[,1] <- NULL
+gis <- NULL
+glob <- NULL
+gc()
+
+ac <- read.table("Cancer Types included in study.txt", header=T, sep="\t", dec=",") #this table was prepared by A. Naba#
+ac <- ac[,c(1,7)] #modify the table by Alexandra to match with data format
+ac$Abbreviation <- ifelse(ac$Abbreviation == "COAD / READ", "COAD",
+                          ifelse(ac$Abbreviation == "LUSC / LUAD", "LUAD",
+                                 ifelse(ac$Abbreviation == "UCS / UCEC", "UCS",
+                                        as.character(ac$Abbreviation))))
+ac.missing <- data.frame(Abbreviation = c("READ", "LUSC", "UCEC"), R.colors = c("darkblue","dimgray","bisque2"))
+ac <- bind_rows(ac, ac.missing)
+names(ac)[1] <- "cancer.type.abbreviation"
+
+r <- subset(r, r$cancer.type.abbreviation %in% ac$cancer.type.abbreviation)
+
+res1 <- list() #this loop calculates all CNAs, binned by categories, in matrisome and rest of the genome#
+for(i in unique(r$cancer.type.abbreviation)){
+  z <- subset(r, r$cancer.type.abbreviation == i)
+  z[,1] <- NULL
+  z <- as.matrix(z)
+  cn.tot <- as.data.frame(colSums(z != 0))
+  names(cn.tot)[1] <- "CNV"
+  cn.tot$tot.samples <- nrow(z)
+  cn.tot$perc <- round((cn.tot$CNV/cn.tot$tot.samples)*100,0)
+  cn.tot$coded <- ifelse(cn.tot$perc == 0, "Q0", ifelse(cn.tot$perc > 0 & cn.tot$perc <= 25, "Q1", ifelse(cn.tot$perc > 25 & cn.tot$perc <= 50, "Q2", ifelse(cn.tot$perc > 50 & cn.tot$perc <= 75, "Q3", "Q4"))))
+  cn.tot <- data.frame(gene=rownames(cn.tot), perc.cnv=cn.tot$coded, tumor=i)
+  cn.tot$source <- ifelse(cn.tot$gene %in% m, "matrisome", "rest of genome")
+  res1[[i]] <- cn.tot
+}
+
+library(RColorBrewer)
+res1 <- bind_rows(res1)
+
+stat1 <- table(res1$perc.cnv,res1$source)
+stat1 <- apply(stat1,2,function(x){round((x/sum(x))*100,0)})
+
+df <- data.frame(test="CNAs binned into quartiles (% of total)", p.value=chisq.test(stat1.1)$p.value)
+fwrite(df, "p-values when putting all CNAs together.txt", sep="\t", row.names = F, quote = F)
+
+stat1 <- data.frame(values=c(stat1[,1],stat1[,2]),x=c(rep(0,4),rep(1,4)), Q=rep(c("Q1","Q2","Q3","Q4"),2),source=c(rep("matrisome",4),rep("rest of genome",4)))
+
+setwd(paste0(dir.actual,"/REVISION MATERIAL"))
+library(ggplot2)
+ggplot(stat1, aes(x=x, y=values, fill=Q)) + geom_bar(position="fill", stat="identity") + theme_classic() + xlab("") + ylab("frequency of each binned CNV group") + scale_x_continuous(breaks = unique(stat1$x), labels = as.character(unique(stat1$source)))
+
+library(Matrix)
+res2 <- list() #this loop calculates all CNAs, binned by categories, in matrisome and rest of the genome#
+for(i in unique(r$cancer.type.abbreviation)){
+  z <- subset(r, r$cancer.type.abbreviation == i)
+  z[,1] <- NULL
+  
+  z2 <- z[,colnames(z) %in% unique(mat$gene)]
+  z2 <- as.matrix(z2)
+  z2 <- ifelse(z2==0,0,1)
+  rn <- round((nnzero(z2)/(ncol(z2)*nrow(z2)))*100,0)
+  
+  z3 <- z[,!colnames(z) %in% unique(mat$gene)]
+  z3 <- as.matrix(z3)
+  z3 <- ifelse(z3==0,0,1)
+  rn2 <- round((nnzero(z3)/(ncol(z3)*nrow(z3)))*100,0)
+  
+  res2[[i]] <- data.frame(tumor=i,CNA.in.matrisome=rn,CNA.in.rest=rn2)
+}
+res2 <- bind_rows(res2)
+sum(ifelse(res2[,2]>res2[,3],1,0)) #in 64% of the tumors studied (9/14), the number of patients with at least one CNA in one matrisome gene is 1-2% more than in the rest of the genome and NEVER lower!
+setwd(paste0(dir.actual,"/REVISON MATERIAL"))
+fwrite(res2, "percentile of patients with at least one CNA_matrisome vs. rest of the genome.txt_divided by tumor type", sep="\t", row.names = F, quote = F)
+
+df <- data.frame(tumor=rep(res2$tumor,2),CNAs=c(res2[,2],res2[,3]),source=c(rep("matrisome",14),rep("rest of genome",14)))
+df$x <- ifelse(df$source=="matrisome",0,1)
+df <- merge(df,ac,by.x="tumor",by.y="cancer.type.abbreviation")
+
+ggplot(df, aes(x=x, y=CNAs, fill=tumor)) + geom_bar(position="fill", stat="identity") +
+  theme_classic() + xlab("") + ylab("frequency of each binned CNV group") + scale_x_continuous(breaks = unique(df$x), labels = as.character(unique(df$source)))
+
+```
+
+"There is an urgent need for validation of the main discoveries (e.g. mutation burden of Col6A1, LAMB3, MUC16, MUC5B, etc.) sourcing other data bases."
+
+answer: sourcing other, non-harmonized databases to cross-validate rare mutations seems impractical. Anyway, we reviewed the frequency of mutation of the 4 genes presented in Fig.7 across the whole CBioPortal collection of non-overlapping studies (127 studies). The wide range of frequencies and the different definitions of clinical endpoints make it impossible to conduct cross-sectional analyses as such.
+
+```{r eval=FALSE}
+
+setwd(dir.data)
+cbio <- fread("sample_matrix.txt",header=T, sep="\t")
+cbio <- as.data.frame(cbio)
+rownames(cbio) <- cbio[,1]
+cbio[,1] <- NULL
+cbio[,1] <- NULL
+cbio$study <- gsub("\\:.*","",rownames(cbio)) 
+dat <- as.matrix(table(cbio$study,cbio$MUC5B))
+tots <- rowSums(dat)
+dat <- as.data.frame.matrix(dat)
+dat$tot <- tots
+names(dat)[1] <- "non.carrier"
+names(dat)[2] <- "carrier"
+dat$'prevalence.of.mutation (any)' <- round((dat$carrier/dat$tot)*100,4)
+plot(density(dat[,4]), main = "frequency of MUC5B mutation across all CBioPortal cohorts")
+ggplot(data=dat,aes(x=rownames(dat),y=`prevalence.of.mutation (any)`,fill=rownames(dat)))+geom_bar(stat = "identity")+theme_bw()+ggtitle(label="MUC16 across CBioPortal")+xlab("")+ylab("Frequency of mutation")
+dat <- dat[order(-dat$`prevalence.of.mutation (any)`),]
+fwrite(dat, "cbioportal_mutations_MUC5B.txt",sep="\t", quote = F, row.names = F)
+
+cbio <- fread("sample_matrix2.txt",header=T, sep="\t")
+cbio <- as.data.frame(cbio)
+rownames(cbio) <- cbio[,1]
+cbio[,1] <- NULL
+cbio[,1] <- NULL
+cbio$study <- gsub("\\:.*","",rownames(cbio)) 
+dat <- as.matrix(table(cbio$study,cbio$MUC16))
+tots <- rowSums(dat)
+dat <- as.data.frame.matrix(dat)
+dat$tot <- tots
+names(dat)[1] <- "non.carrier"
+names(dat)[2] <- "carrier"
+dat$'prevalence.of.mutation (any)' <- round((dat$carrier/dat$tot)*100,4)
+plot(density(dat[,4]), main = "frequency of MUC16 mutation across all CBioPortal cohorts")
+ggplot(data=dat,aes(x=rownames(dat),y=`prevalence.of.mutation (any)`,fill=rownames(dat)))+geom_bar(stat = "identity")+theme_bw()+ggtitle(label="MUC16 across CBioPortal")+xlab("")+ylab("Frequency of mutation")
+dat <- dat[order(-dat$`prevalence.of.mutation (any)`),]
+fwrite(dat, "cbioportal_mutations_MUC16.txt",sep="\t", quote = F, row.names = F)
+
+cbio <- fread("sample_matrix3.txt",header=T, sep="\t")
+cbio <- as.data.frame(cbio)
+rownames(cbio) <- cbio[,1]
+cbio[,1] <- NULL
+cbio[,1] <- NULL
+cbio$study <- gsub("\\:.*","",rownames(cbio)) 
+dat <- as.matrix(table(cbio$study,cbio$COL6A1))
+tots <- rowSums(dat)
+dat <- as.data.frame.matrix(dat)
+dat$tot <- tots
+names(dat)[1] <- "non.carrier"
+names(dat)[2] <- "carrier"
+dat$'prevalence.of.mutation (any)' <- round((dat$carrier/dat$tot)*100,4)
+plot(density(dat[,4]), main = "frequency of COL6A1 mutation across all CBioPortal cohorts")
+ggplot(data=dat,aes(x=rownames(dat),y=`prevalence.of.mutation (any)`,fill=rownames(dat)))+geom_bar(stat = "identity")+theme_bw()+ggtitle(label="COL6A1 across CBioPortal")+xlab("")+ylab("Frequency of mutation")
+dat <- dat[order(-dat$`prevalence.of.mutation (any)`),]
+fwrite(dat, "cbioportal_mutations_COL6A1.txt",sep="\t", quote = F, row.names = F)
+
+cbio <- fread("sample_matrix4.txt",header=T, sep="\t")
+cbio <- as.data.frame(cbio)
+rownames(cbio) <- cbio[,1]
+cbio[,1] <- NULL
+cbio[,1] <- NULL
+cbio$study <- gsub("\\:.*","",rownames(cbio)) 
+dat <- as.matrix(table(cbio$study,cbio$LAMB3))
+tots <- rowSums(dat)
+dat <- as.data.frame.matrix(dat)
+dat$tot <- tots
+names(dat)[1] <- "non.carrier"
+names(dat)[2] <- "carrier"
+dat$'prevalence.of.mutation (any)' <- round((dat$carrier/dat$tot)*100,4)
+plot(density(dat[,4]), main = "frequency of LAMB3 mutation across all CBioPortal cohorts")
+ggplot(data=dat,aes(x=rownames(dat),y=`prevalence.of.mutation (any)`,fill=rownames(dat)))+geom_bar(stat = "identity")+theme_bw()+ggtitle(label="LAMB3 across CBioPortal")+xlab("")+ylab("Frequency of mutation")
+dat <- dat[order(-dat$`prevalence.of.mutation (any)`),]
+fwrite(dat, "cbioportal_mutations_LAMB3.txt",sep="\t", quote = F, row.names = F)
+
+```
+
+
