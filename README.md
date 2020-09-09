@@ -6,4 +6,4 @@ This repository contains the code (in R language) that was used to generate all 
 
 Raw data are too big to fit in the repository, but they can be downloaded from Zenodo (10.5281/zenodo.3889651).
 
-Code is also available in HTML format at https://rpubs.com/Izzilab/matrisome-mutations
+Code is also available in HTML format at https://www.rpubs.com/Izzilab/matrisome-CNAs-and-mutations
